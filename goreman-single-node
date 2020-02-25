@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+
+PROCFILE_FILENAME="Procfile.tmp"
+CLIENT_PORT=2379
+PEER_PORT=12380
+
+ETCD_PREFIX="etcd"
+INFRA_PREFIX="infra"
+TOKEN_PREFIX="etcd-cluster-"
+
+# change it when necessary
+NODE_NO=1
+URLS=("192.168.198.131" "192.168.198.132" "192.168.198.134")
+
+ETCD_NAME="${ETCD_PREFIX}${NODE_NO}"
+INFRA_NAME="${INFRA_PREFIX}${NODE_NO}"
+TOKEN_NAME="${TOKEN_PREFIX}1"
+
+LOCAL_IP="${URLS[${NODE_NO}-1]}"
+
+CLIENT_URL="http://${LOCAL_IP}:${CLIENT_PORT}"
+PEER_URL="http://${LOCAL_IP}:${PEER_PORT}"
+INIT_CLUSTERS="'${INFRA_PREFIX}1=http://${URLS[0]}:${PEER_PORT},${INFRA_PREFIX}2=http://${URLS[1]}:${PEER_PORT},${INFRA_PREFIX}3=http://${URLS[2]}:${PEER_PORT}'"
+
+SELF_FLAGS="--name ${INFRA_NAME} --listen-client-urls ${CLIENT_URL} --advertise-client-urls ${CLIENT_URL} --listen-peer-urls ${PEER_URL}"
+INIT_FLAGS="--initial-advertise-peer-urls ${PEER_URL} --initial-cluster-token ${TOKEN_NAME} --initial-cluster ${INIT_CLUSTERS} --initial-cluster-state new"
+RESTART_FLAGS="--initial-cluster-state existing"
+EXTRA_FLAGS="--enable-pprof --logger=zap --log-outputs=stderr"
+
+if [ $# -eq 0 ] || [ $1 -ne "restart" ]; then
+    PROCFILE_CONTENT="${ETCD_NAME}: bin/etcd ${SELF_FLAGS} ${INIT_FLAGS} ${EXTRA_FLAGS}"
+    echo "${PROCFILE_CONTENT}" | tee "${PROCFILE_FILENAME}"
+
+    rm -rf ${INFRA_PREFIX}[0-9].etcd
+
+    ./goreman -f ${PROCFILE_FILENAME} start
+else
+    PROCFILE_CONTENT="${ETCD_NAME}: bin/etcd ${SELF_FLAGS} ${RESTART_FLAGS} ${EXTRA_FLAGS}"
+    echo "${PROCFILE_CONTENT}" | tee "${PROCFILE_FILENAME}"
+
+    ./goreman -f ${PROCFILE_FILENAME} start
+fi
+
