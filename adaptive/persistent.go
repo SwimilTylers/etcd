@@ -1,0 +1,44 @@
+package adaptive
+
+import (
+	"go.etcd.io/etcd/raft/raftpb"
+	"time"
+)
+
+var DefaultStrategy = &PersistentStrategy{
+	Fsync:             false,
+	MaxLocalCacheSize: 50,
+	CachePreserveTime: time.Second,
+}
+
+type PersistentConfig struct {
+	Strategy *PersistentStrategy
+	Remotes  []*PersistentRemoteDescriptor
+}
+
+type PersistentStrategy struct {
+	Fsync             bool
+	MaxLocalCacheSize int
+	CachePreserveTime time.Duration
+}
+
+type PersistentRemoteDescriptor struct {
+}
+
+// PersistentManager wraps Storage and keeps track on each persistent ops
+type PersistentManager interface {
+	Save(st raftpb.HardState, ents []raftpb.Entry) error
+	SaveSnap(snap raftpb.Snapshot) error
+	Close() error
+
+	Flush() error
+
+	GetConfig() *PersistentConfig
+	SetConfig(cfg *PersistentConfig) error
+
+	GetStrategy() *PersistentStrategy
+	SetStrategy(strategy *PersistentStrategy) error
+
+	AddRemoteDisk(desc *PersistentRemoteDescriptor) error
+	RemoveRemoteDisk(desc *PersistentRemoteDescriptor) error
+}

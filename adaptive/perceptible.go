@@ -1,0 +1,32 @@
+package adaptive
+
+type PerceptibleConfig struct {
+	// Leader id. If not decided, it sets to raft.None
+	Leader uint64
+
+	// Initial status of Perceptible
+	Critical bool
+
+	// Peers will be nil if there is no update.
+	Peers []uint64
+}
+
+// Perceptible perceives the connectivity of peers
+type Perceptible interface {
+	// GetConfig returns current PerceptibleConfig
+	GetConfig() *PerceptibleConfig
+
+	// SetConfig allows configuration update, including:
+	// 1. Add/Remove peers
+	// 2. Explicit status update
+	// 3. Change leadership
+	// To be mentioned, all internal states should reset before the update
+	SetConfig(config *PerceptibleConfig) error
+
+	// Perceive check the current connectivity
+	Perceive(id uint64, isConnected bool)
+
+	// IsCritical tells whether data persistence is compulsory
+	// This involves the adaptive coordination mechanism
+	IsCritical() bool
+}
