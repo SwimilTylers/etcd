@@ -1,6 +1,11 @@
 package adaptive
 
+import "go.etcd.io/etcd/raft"
+
 type PerceptibleConfig struct {
+	// State. It can be Follower/Leader/Candidate
+	State raft.StateType
+
 	// Leader id. If not decided, it sets to raft.None
 	Leader uint64
 

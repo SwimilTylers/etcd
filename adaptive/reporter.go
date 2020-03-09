@@ -1,11 +1,11 @@
 package adaptive
 
-type ConnectionReporter struct {
+type TokenBucketReporter struct {
 	counter  int
 	maxToken int
 }
 
-func (cr *ConnectionReporter) Positive() {
+func (cr *TokenBucketReporter) Positive() {
 	if cr.counter >= cr.maxToken {
 		cr.counter = cr.maxToken
 	} else {
@@ -13,7 +13,7 @@ func (cr *ConnectionReporter) Positive() {
 	}
 }
 
-func (cr *ConnectionReporter) Negative() {
+func (cr *TokenBucketReporter) Negative() {
 	if cr.counter <= 0 {
 		cr.counter = 0
 	} else {
@@ -21,6 +21,6 @@ func (cr *ConnectionReporter) Negative() {
 	}
 }
 
-func (cr *ConnectionReporter) Gather() bool {
+func (cr *TokenBucketReporter) Test() bool {
 	return cr.counter > 0
 }

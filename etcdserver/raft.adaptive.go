@@ -400,7 +400,8 @@ func NewAdaNode(r *raftNode, peers []uint64) *AdaNode {
 	return &AdaNode{
 		raftNode: r,
 		peers:    peers,
-		PeerMonitor: adaptive.NewPeerMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
+		PeerMonitor: adaptive.NewSAUCRMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
+			State:    raft.StateFollower,
 			Leader:   raft.None,
 			Critical: false,
 			Peers:    peers,
