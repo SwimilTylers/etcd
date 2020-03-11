@@ -1,26 +1,46 @@
 package adaptive
 
+import "bytes"
+
+type Reporter interface {
+	Positive()
+	Negative()
+	Report() bool
+}
+
 type TokenBucketReporter struct {
 	counter  int
 	maxToken int
 }
 
-func (cr *TokenBucketReporter) Positive() {
-	if cr.counter >= cr.maxToken {
-		cr.counter = cr.maxToken
+func (tbr *TokenBucketReporter) String() string {
+	var buffer bytes.Buffer
+	for i := 0; i < tbr.maxToken; i++ {
+		if i < tbr.counter {
+			buffer.WriteByte('+')
+		} else {
+			buffer.WriteByte('-')
+		}
+	}
+	return buffer.String()
+}
+
+func (tbr *TokenBucketReporter) Positive() {
+	if tbr.counter >= tbr.maxToken {
+		tbr.counter = tbr.maxToken
 	} else {
-		cr.counter++
+		tbr.counter++
 	}
 }
 
-func (cr *TokenBucketReporter) Negative() {
-	if cr.counter <= 0 {
-		cr.counter = 0
+func (tbr *TokenBucketReporter) Negative() {
+	if tbr.counter <= 0 {
+		tbr.counter = 0
 	} else {
-		cr.counter--
+		tbr.counter--
 	}
 }
 
-func (cr *TokenBucketReporter) Test() bool {
-	return cr.counter > 0
+func (tbr *TokenBucketReporter) Report() bool {
+	return tbr.counter > 0
 }

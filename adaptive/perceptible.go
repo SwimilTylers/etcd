@@ -9,6 +9,9 @@ type PerceptibleConfig struct {
 	// Leader id. If not decided, it sets to raft.None
 	Leader uint64
 
+	// Self id. Use to distinguish self from others
+	Self uint64
+
 	// Initial status of Perceptible
 	Critical bool
 
