@@ -397,15 +397,24 @@ func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 }
 
 func NewAdaNode(r *raftNode, peers []uint64) *AdaNode {
+	monitor, err := adaptive.NewSAUCRMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
+		State:    raft.StateFollower,
+		Leader:   raft.None,
+		Critical: false,
+		Peers:    peers,
+	})
+
+	if err != nil {
+		if r.lg != nil {
+			r.lg.Fatal("AdaNode instantiation failed", zap.Error(err))
+		}
+		return nil
+	}
+
 	return &AdaNode{
-		raftNode: r,
-		peers:    peers,
-		PeerMonitor: adaptive.NewSAUCRMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
-			State:    raft.StateFollower,
-			Leader:   raft.None,
-			Critical: false,
-			Peers:    peers,
-		}),
+		raftNode:    r,
+		peers:       peers,
+		PeerMonitor: monitor,
 		currentMode: NORMAL,
 		PManager:    NewLocalDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: adaptive.DefaultStrategy}),
 	}

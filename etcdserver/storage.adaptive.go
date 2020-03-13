@@ -3,6 +3,7 @@ package etcdserver
 import (
 	"errors"
 	"go.etcd.io/etcd/adaptive"
+	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 	"sync"
@@ -33,22 +34,50 @@ type LocalCachedDisk struct {
 
 	cachePreserveTime time.Duration
 
-	cachePreserve <-chan time.Time
+	// reminder of cache persistence
+	cachePreserveReminder <-chan time.Time
 }
 
 func (lcd *LocalCachedDisk) Flush() error {
-	if len(lcd.cachedEntries) != 0 {
-		lcd.cachePreserve = nil
+	lcd.mu.Lock()
+	defer lcd.mu.Unlock()
 
-		err := lcd.disk.Save(lcd.cachedHardState, lcd.cachedEntries)
+	return lcd.flushInternal("Flush", emptyState, nil)
+}
 
-		lcd.cachedEntries = lcd.cachedEntries[:0]
-		lcd.cachedHardState = emptyState
+func (lcd *LocalCachedDisk) flushInternal(callerName string, otherSourceHS raftpb.HardState, otherSourceEnt []raftpb.Entry) error {
+	var hs = lcd.cachedHardState
+	var entries = lcd.cachedEntries
 
-		return err
-	} else {
+	// check whether there is a otherSource caches
+	if !raft.IsEmptyHardState(otherSourceHS) {
+		hs = otherSourceHS
+	}
+
+	if otherSourceEnt != nil {
+		entries = otherSourceEnt
+	}
+
+	// check if a dummy flush
+	if len(entries) == 0 {
 		return nil
 	}
+
+	err := lcd.disk.Save(hs, entries)
+
+	// clear cache
+	lcd.cachePreserveReminder = nil
+	lcd.cachedEntries = lcd.cachedEntries[:0]
+	lcd.cachedHardState = emptyState
+
+	if lcd.logger != nil && err != nil {
+		lcd.logger.Error("error occurs when persist cached entries",
+			zap.String("op", callerName),
+			zap.Error(err),
+		)
+	}
+
+	return err
 }
 
 func (lcd *LocalCachedDisk) GetConfig() *adaptive.PersistentConfig {
@@ -78,15 +107,7 @@ func (lcd *LocalCachedDisk) SetConfig(cfg *adaptive.PersistentConfig) error {
 			return errors.New("illegal configuration")
 		}
 
-		lcd.fsync = cfg.Strategy.Fsync
-		lcd.maxLocalCacheSize = cfg.Strategy.MaxLocalCacheSize
-		lcd.cachePreserveTime = cfg.Strategy.CachePreserveTime
-
-		if lcd.maxLocalCacheSize > cap(lcd.cachedEntries) {
-			newCache := make([]raftpb.Entry, len(lcd.cachedEntries), lcd.maxLocalCacheSize+1)
-			copy(newCache, lcd.cachedEntries)
-			lcd.cachedEntries = newCache
-		}
+		lcd.updateStrategy(cfg.Strategy)
 	}
 
 	return nil
@@ -111,6 +132,17 @@ func (lcd *LocalCachedDisk) SetStrategy(strategy *adaptive.PersistentStrategy) e
 		return errors.New("illegal configuration")
 	}
 
+	lcd.updateStrategy(strategy)
+
+	if strategy.Fsync && len(lcd.cachedEntries) > 0 {
+		// if there is non-persisted entries, flush it immediately
+		return lcd.flushInternal("SetStrategy", emptyState, nil)
+	} else {
+		return nil
+	}
+}
+
+func (lcd *LocalCachedDisk) updateStrategy(strategy *adaptive.PersistentStrategy) {
 	lcd.fsync = strategy.Fsync
 	lcd.maxLocalCacheSize = strategy.MaxLocalCacheSize
 	lcd.cachePreserveTime = strategy.CachePreserveTime
@@ -121,7 +153,13 @@ func (lcd *LocalCachedDisk) SetStrategy(strategy *adaptive.PersistentStrategy) e
 		lcd.cachedEntries = newCache
 	}
 
-	return nil
+	if lcd.logger != nil {
+		lcd.logger.Info("apply new strategy",
+			zap.Bool("fsync", lcd.fsync),
+			zap.Int("maxLocalCacheSize", lcd.maxLocalCacheSize),
+			zap.String("cachePreserveTime", lcd.cachePreserveTime.String()),
+		)
+	}
 }
 
 func (lcd *LocalCachedDisk) Save(st raftpb.HardState, ents []raftpb.Entry) error {
@@ -132,28 +170,23 @@ func (lcd *LocalCachedDisk) Save(st raftpb.HardState, ents []raftpb.Entry) error
 	newLen := len(ents)
 
 	select {
-	case <-lcd.cachePreserve:
+	case <-lcd.cachePreserveReminder:
 		send := make([]raftpb.Entry, curLen+newLen)
 		copy(send, lcd.cachedEntries)
 		copy(send[curLen:], ents)
 
-		lcd.cachePreserve = nil
-
-		err := lcd.disk.Save(st, send)
-
-		// clear cache
-		lcd.cachedEntries = lcd.cachedEntries[:0]
-		lcd.cachedHardState = emptyState
-
-		return err
+		return lcd.flushInternal("Save", st, send)
 	default:
 		if !lcd.fsync && curLen+newLen < lcd.maxLocalCacheSize {
 			lcd.cachedEntries = lcd.cachedEntries[:curLen+newLen]
 			copy(lcd.cachedEntries[curLen:], ents)
-			lcd.cachedHardState = st
 
-			if lcd.cachePreserve != nil {
-				lcd.cachePreserve = time.After(lcd.cachePreserveTime)
+			if !raft.IsEmptyHardState(st) {
+				lcd.cachedHardState = st
+			}
+
+			if lcd.cachePreserveReminder == nil {
+				lcd.cachePreserveReminder = time.After(lcd.cachePreserveTime)
 			}
 
 			return nil
@@ -162,24 +195,55 @@ func (lcd *LocalCachedDisk) Save(st raftpb.HardState, ents []raftpb.Entry) error
 			copy(send, lcd.cachedEntries)
 			copy(send[curLen:], ents)
 
-			lcd.cachePreserve = nil
-
-			err := lcd.disk.Save(st, send)
-
-			// clear cache
-			lcd.cachedEntries = lcd.cachedEntries[:0]
-			lcd.cachedHardState = emptyState
-
-			return err
+			return lcd.flushInternal("Save", st, send)
 		}
 	}
 }
 
 func (lcd *LocalCachedDisk) SaveSnap(snap raftpb.Snapshot) error {
+	lcd.mu.Lock()
+	defer lcd.mu.Unlock()
+
+	select {
+	case <-lcd.cachePreserveReminder:
+
+		lcd.cachePreserveReminder = nil
+
+		err := lcd.disk.Save(lcd.cachedHardState, lcd.cachedEntries)
+
+		// clear cache
+		lcd.cachedEntries = lcd.cachedEntries[:0]
+		lcd.cachedHardState = emptyState
+
+		if lcd.logger != nil && err != nil {
+			lcd.logger.Error("error occurs when persist cached entries",
+				zap.String("op", "SaveSnap"),
+				zap.Error(err),
+			)
+		}
+	default:
+	}
+
 	return lcd.disk.SaveSnap(snap)
 }
 
 func (lcd *LocalCachedDisk) Close() error {
+	lcd.mu.Lock()
+	defer lcd.mu.Unlock()
+
+	if len(lcd.cachedEntries) != 0 {
+		if err := lcd.disk.Save(lcd.cachedHardState, lcd.cachedEntries); lcd.logger != nil && err != nil {
+			lcd.logger.Error("error occurs when persist cached entries",
+				zap.String("op", "Close"),
+				zap.Error(err),
+			)
+		}
+
+		lcd.cachedHardState = emptyState
+		lcd.cachedEntries = lcd.cachedEntries[:0]
+		lcd.cachePreserveReminder = nil
+	}
+
 	return lcd.disk.Close()
 }
 
@@ -192,15 +256,25 @@ func (lcd *LocalCachedDisk) RemoveRemoteDisk(desc *adaptive.PersistentRemoteDesc
 }
 
 func NewLocalDisk(logger *zap.Logger, disk Storage, config *adaptive.PersistentConfig) *LocalCachedDisk {
-	return &LocalCachedDisk{
-		logger:            logger,
-		mu:                sync.Mutex{},
-		fsync:             config.Strategy.Fsync,
-		disk:              disk,
-		cachedHardState:   emptyState,
-		cachedEntries:     make([]raftpb.Entry, 0, config.Strategy.MaxLocalCacheSize),
-		maxLocalCacheSize: config.Strategy.MaxLocalCacheSize,
-		cachePreserveTime: config.Strategy.CachePreserveTime,
-		cachePreserve:     nil,
+	ret := &LocalCachedDisk{
+		logger:                logger,
+		mu:                    sync.Mutex{},
+		fsync:                 config.Strategy.Fsync,
+		disk:                  disk,
+		cachedHardState:       emptyState,
+		cachedEntries:         make([]raftpb.Entry, 0, config.Strategy.MaxLocalCacheSize),
+		maxLocalCacheSize:     config.Strategy.MaxLocalCacheSize,
+		cachePreserveTime:     config.Strategy.CachePreserveTime,
+		cachePreserveReminder: nil,
 	}
+
+	if ret.logger != nil {
+		ret.logger.Info("apply strategy",
+			zap.Bool("fsync", ret.fsync),
+			zap.Int("maxLocalCacheSize", ret.maxLocalCacheSize),
+			zap.String("cachePreserveTime", ret.cachePreserveTime.String()),
+		)
+	}
+
+	return ret
 }
