@@ -42,3 +42,9 @@ type PersistentManager interface {
 	AddRemoteDisk(desc *PersistentRemoteDescriptor) error
 	RemoveRemoteDisk(desc *PersistentRemoteDescriptor) error
 }
+
+func SetPersistentFsync(manager PersistentManager, fsync bool) error {
+	strategy := manager.GetStrategy()
+	strategy.Fsync = fsync
+	return manager.SetStrategy(strategy)
+}

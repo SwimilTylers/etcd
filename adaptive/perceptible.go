@@ -38,3 +38,22 @@ type Perceptible interface {
 	// This involves the adaptive coordination mechanism
 	IsCritical() bool
 }
+
+func SetPerceptibleState(p Perceptible, state raft.StateType) error {
+	cfg := p.GetConfig()
+	cfg.State = state
+	return p.SetConfig(cfg)
+}
+
+func SetPerceptibleLeader(p Perceptible, leader uint64) error {
+	cfg := p.GetConfig()
+	cfg.Leader = leader
+	return p.SetConfig(cfg)
+}
+
+func SetPerceptibleLeaderAndState(p Perceptible, leader uint64, state raft.StateType) error {
+	cfg := p.GetConfig()
+	cfg.Leader = leader
+	cfg.State = state
+	return p.SetConfig(cfg)
+}
