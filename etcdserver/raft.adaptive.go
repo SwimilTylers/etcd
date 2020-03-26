@@ -24,9 +24,10 @@ const (
 )
 
 type AdaNode struct {
-	*raftNode
+	raftNode
 
 	peers []uint64
+	self  uint64
 
 	// PeerMonitor perceives the connectivity of peers and decides
 	// whether to switch between fast-but-not-reliable mode and
@@ -34,7 +35,7 @@ type AdaNode struct {
 	//
 	// To be more specific:
 	//   1. PeerMonitor perceives connectivity from the result of heartbeat
-	//   2. When SAUCRMonitor.IsCritical is true, running in slow mode
+	//   2. When SaucrMonitor.IsCritical is true, running in slow mode
 	//   3. When SoftState changes, PeerMonitor has to reset
 	PeerMonitor adaptive.Perceptible
 
@@ -83,19 +84,7 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 					an.td.Reset()
 
 					// refresh PeerMonitor's state
-					pConfig := &adaptive.PerceptibleConfig{
-						Leader:   rd.SoftState.Lead,
-						Critical: true,
-						Peers:    an.peers,
-					}
-
-					if err := an.PeerMonitor.SetConfig(pConfig); err != nil {
-						if an.lg != nil {
-							an.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
-						} else {
-							plog.Fatalf("PeerMonitor refreshing error: %v", err)
-						}
-					}
+					an.updatePeerMonitorFromReady(rd)
 				}
 
 				if len(rd.ReadStates) != 0 {
@@ -133,7 +122,6 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 				if isLead {
 					// gofail: var raftBeforeLeaderSend struct{}
 					an.transport.Send(an.processMessages(rd.Messages))
-
 					isCritical := an.PeerMonitor.IsCritical()
 
 					if isCritical && an.currentMode == NORMAL {
@@ -371,6 +359,7 @@ func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 			ms[i].To = 0
 		}
 		if ms[i].Type == raftpb.MsgHeartbeat {
+			an.PeerMonitor.Perceive(ms[i].To, false)
 			ok, exceed := an.td.Observe(ms[i].To)
 			if !ok {
 				// TODO: limit request rate.
@@ -388,15 +377,50 @@ func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 				}
 				heartbeatSendFailures.Inc()
 			}
-
-			// swimiltylers: perceive the status of peers
-			an.PeerMonitor.Perceive(ms[i].To, ok)
 		}
 	}
 	return ms
 }
 
-func NewAdaNode(r *raftNode, peers []uint64) *AdaNode {
+func (an *AdaNode) updatePeerMonitorFromReady(rd raft.Ready) {
+	if rd.RaftState == raft.StateLeader || rd.RaftState == raft.StateFollower {
+		critical := an.PeerMonitor.IsCritical()
+		pConfig := &adaptive.PerceptibleConfig{
+			State:    rd.RaftState,
+			Leader:   rd.SoftState.Lead,
+			Self:     an.self,
+			Critical: critical,
+			Peers:    an.peers,
+		}
+
+		if err := an.PeerMonitor.SetConfig(pConfig); err != nil {
+			if an.lg != nil {
+				an.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
+			} else {
+				plog.Fatalf("PeerMonitor refreshing error: %v", err)
+			}
+		}
+	} else {
+		pConfig := &adaptive.PerceptibleConfig{
+			State:    rd.RaftState,
+			Leader:   rd.SoftState.Lead,
+			Self:     an.self,
+			Critical: true,
+			Peers:    an.peers,
+		}
+
+		if err := an.PeerMonitor.SetConfig(pConfig); err != nil {
+			if an.lg != nil {
+				an.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
+			} else {
+				plog.Fatalf("PeerMonitor refreshing error: %v", err)
+			}
+		}
+	}
+
+}
+
+func NewAdaNode(r raftNode, peers []uint64) *AdaNode {
 	monitor, err := adaptive.NewSAUCRMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
 		State:    raft.StateFollower,
 		Leader:   raft.None,
@@ -414,6 +438,7 @@ func NewAdaNode(r *raftNode, peers []uint64) *AdaNode {
 	return &AdaNode{
 		raftNode:    r,
 		peers:       peers,
+		self:        0,
 		PeerMonitor: monitor,
 		currentMode: NORMAL,
 		PManager:    NewLocalDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: adaptive.DefaultStrategy}),

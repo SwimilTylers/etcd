@@ -9,7 +9,7 @@ import (
 	"sync"
 )
 
-type SAUCRMonitor struct {
+type SaucrMonitor struct {
 	logger *zap.Logger
 
 	mu sync.Mutex
@@ -29,7 +29,7 @@ type SAUCRMonitor struct {
 	mustCritical bool
 }
 
-func (sm *SAUCRMonitor) String() string {
+func (sm *SaucrMonitor) String() string {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -47,15 +47,15 @@ func (sm *SAUCRMonitor) String() string {
 	return buffer.String()
 }
 
-func (sm *SAUCRMonitor) MaxToken() int {
+func (sm *SaucrMonitor) MaxToken() int {
 	return sm.maxToken
 }
 
-func (sm *SAUCRMonitor) SetMaxToken(maxToken int) {
+func (sm *SaucrMonitor) SetMaxToken(maxToken int) {
 	sm.maxToken = maxToken
 }
 
-func (sm *SAUCRMonitor) GetConfig() *PerceptibleConfig {
+func (sm *SaucrMonitor) GetConfig() *PerceptibleConfig {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -68,7 +68,7 @@ func (sm *SAUCRMonitor) GetConfig() *PerceptibleConfig {
 	}
 }
 
-func (sm *SAUCRMonitor) SetConfig(config *PerceptibleConfig) error {
+func (sm *SaucrMonitor) SetConfig(config *PerceptibleConfig) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -111,7 +111,7 @@ func (sm *SAUCRMonitor) SetConfig(config *PerceptibleConfig) error {
 	return nil
 }
 
-func (sm *SAUCRMonitor) Perceive(id uint64, isConnected bool) {
+func (sm *SaucrMonitor) Perceive(id uint64, isConnected bool) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
@@ -138,14 +138,14 @@ func (sm *SAUCRMonitor) Perceive(id uint64, isConnected bool) {
 	}
 }
 
-func (sm *SAUCRMonitor) IsCritical() bool {
+func (sm *SaucrMonitor) IsCritical() bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
 	return sm.evaluate()
 }
 
-func (sm *SAUCRMonitor) refreshStateWithOption(state raft.StateType, isInitCritical bool) error {
+func (sm *SaucrMonitor) refreshStateWithOption(state raft.StateType, isInitCritical bool) error {
 	sm.state = state
 
 	if state == raft.StateLeader {
@@ -165,7 +165,7 @@ func (sm *SAUCRMonitor) refreshStateWithOption(state raft.StateType, isInitCriti
 	return nil
 }
 
-func (sm *SAUCRMonitor) refreshPeersWithOption(peers []uint64, isInitCritical bool) error {
+func (sm *SaucrMonitor) refreshPeersWithOption(peers []uint64, isInitCritical bool) error {
 	if peers == nil || len(peers) == 0 {
 		return errors.New("monitor is refreshed by empty peer list")
 	} else if len(peers) < 3 {
@@ -186,7 +186,7 @@ func (sm *SAUCRMonitor) refreshPeersWithOption(peers []uint64, isInitCritical bo
 	return nil
 }
 
-func (sm *SAUCRMonitor) findIndex(key uint64) int {
+func (sm *SaucrMonitor) findIndex(key uint64) int {
 	for i, peer := range sm.peers {
 		if peer == key {
 			return i
@@ -196,7 +196,7 @@ func (sm *SAUCRMonitor) findIndex(key uint64) int {
 	return -1
 }
 
-func (sm *SAUCRMonitor) countUnconnectedEscapeSelf() int {
+func (sm *SaucrMonitor) countUnconnectedEscapeSelf() int {
 	counter := 0
 	for i, u := range sm.unconnected {
 		if u && sm.peers[i] != sm.self {
@@ -206,7 +206,7 @@ func (sm *SAUCRMonitor) countUnconnectedEscapeSelf() int {
 	return counter
 }
 
-func (sm *SAUCRMonitor) evaluate() bool {
+func (sm *SaucrMonitor) evaluate() bool {
 	if sm.mustCritical {
 		// if manually set mustCritical, it should blindly follows
 		return true
@@ -232,8 +232,8 @@ func (sm *SAUCRMonitor) evaluate() bool {
 	}
 }
 
-func NewSAUCRMonitor(logger *zap.Logger, maxConnToken int, config *PerceptibleConfig) (*SAUCRMonitor, error) {
-	ret := &SAUCRMonitor{logger: logger, mu: sync.Mutex{}, maxToken: maxConnToken}
+func NewSAUCRMonitor(logger *zap.Logger, maxConnToken int, config *PerceptibleConfig) (*SaucrMonitor, error) {
+	ret := &SaucrMonitor{logger: logger, mu: sync.Mutex{}, maxToken: maxConnToken}
 	if err := ret.SetConfig(config); err != nil {
 		return nil, err
 	} else {
