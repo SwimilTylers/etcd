@@ -421,7 +421,7 @@ func (an *AdaNode) updatePeerMonitorFromReady(rd raft.Ready) {
 }
 
 func NewAdaNode(r raftNode, peers []uint64) *AdaNode {
-	monitor, err := adaptive.NewSAUCRMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
+	monitor, err := adaptive.NewSaucrMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
 		State:    raft.StateFollower,
 		Leader:   raft.None,
 		Critical: false,

@@ -23,7 +23,7 @@ func TestInitializationNonCritical(t *testing.T) {
 	config.Self = config.Peers[selfIdx]
 
 	// 01: non-critical start
-	machine, _ := NewSAUCRMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
 
 	if !machine.IsCritical() {
 		t.Fatal("01: stay critical before any leader is chosen")
@@ -134,7 +134,7 @@ func TestInitializationCritical(t *testing.T) {
 	config.Self = config.Peers[selfIdx]
 
 	// 01: non-critical start
-	machine, _ := NewSAUCRMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
 
 	if !machine.IsCritical() {
 		t.Fatal("01: When config.Critical is false, SAUCR should be initialized as critical state")
@@ -290,7 +290,7 @@ func TestLeaderDetection(t *testing.T) {
 	config.Leader = config.Self
 
 	// normal start
-	machine, _ := NewSAUCRMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
 
 	if machine.IsCritical() {
 		t.Fatal("saucr should be initialized in non-critical mode")
@@ -411,7 +411,7 @@ func TestFollowerDetection(t *testing.T) {
 	config.Leader = config.Peers[leaderIdx]
 
 	// normal start
-	machine, _ := NewSAUCRMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
 
 	if machine.IsCritical() {
 		t.Fatal("saucr should be initialized in non-critical mode")
@@ -518,7 +518,7 @@ func TestCandidateDetection(t *testing.T) {
 	config.Leader = raft.None
 
 	// normal start
-	machine, err := NewSAUCRMonitor(nil, tokenSize, config)
+	machine, err := NewSaucrMonitor(nil, tokenSize, config)
 
 	if err == nil {
 		t.Fatal("instantiation should detect illegal field:", err)
@@ -527,7 +527,7 @@ func TestCandidateDetection(t *testing.T) {
 	config.Critical = true
 
 	// normal start
-	machine, _ = NewSAUCRMonitor(nil, tokenSize, config)
+	machine, _ = NewSaucrMonitor(nil, tokenSize, config)
 
 	if !machine.IsCritical() {
 		t.Fatal("saucr should be initialized in critical mode")
@@ -559,7 +559,7 @@ func TestCandidateDetection(t *testing.T) {
 }
 
 func TestModeSwitch(t *testing.T) {
-	machine, _ := NewSAUCRMonitor(nil, 2, &PerceptibleConfig{
+	machine, _ := NewSaucrMonitor(nil, 2, &PerceptibleConfig{
 		State:    raft.StateLeader,
 		Critical: false,
 		Peers:    GeneratePeers(5),
@@ -600,7 +600,7 @@ func TestModeSwitch(t *testing.T) {
 		t.Fatal("leader should switch to non-critical")
 	}
 
-	machine, _ = NewSAUCRMonitor(nil, 2, &PerceptibleConfig{
+	machine, _ = NewSaucrMonitor(nil, 2, &PerceptibleConfig{
 		State:    raft.StateFollower,
 		Critical: false,
 		Peers:    GeneratePeers(5),

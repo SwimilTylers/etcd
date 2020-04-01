@@ -119,6 +119,10 @@ func (sm *SaucrMonitor) Perceive(id uint64, isConnected bool) {
 		return
 	}
 
+	if sm.state != raft.StateLeader {
+		return
+	}
+
 	var index = sm.findIndex(id)
 	if index != -1 {
 		if isConnected {
@@ -232,7 +236,7 @@ func (sm *SaucrMonitor) evaluate() bool {
 	}
 }
 
-func NewSAUCRMonitor(logger *zap.Logger, maxConnToken int, config *PerceptibleConfig) (*SaucrMonitor, error) {
+func NewSaucrMonitor(logger *zap.Logger, maxConnToken int, config *PerceptibleConfig) (*SaucrMonitor, error) {
 	ret := &SaucrMonitor{logger: logger, mu: sync.Mutex{}, maxToken: maxConnToken}
 	if err := ret.SetConfig(config); err != nil {
 		return nil, err
