@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+
+PROTOBUF_PATH=${GOPATH}/pkg/mod/github.com/gogo/protobuf@v1.2.1
+
+exec protoc -I=. -I="${PROTOBUF_PATH}"/protobuf -I="${PROTOBUF_PATH}" --gogo_out=plugins=grpc:. ./raft/raftpb/raft.proto

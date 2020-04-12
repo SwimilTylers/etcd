@@ -83,25 +83,29 @@ func (EntryType) EnumDescriptor() ([]byte, []int) { return fileDescriptorRaft, [
 type MessageType int32
 
 const (
-	MsgHup            MessageType = 0
-	MsgBeat           MessageType = 1
-	MsgProp           MessageType = 2
-	MsgApp            MessageType = 3
-	MsgAppResp        MessageType = 4
-	MsgVote           MessageType = 5
-	MsgVoteResp       MessageType = 6
-	MsgSnap           MessageType = 7
-	MsgHeartbeat      MessageType = 8
-	MsgHeartbeatResp  MessageType = 9
-	MsgUnreachable    MessageType = 10
-	MsgSnapStatus     MessageType = 11
-	MsgCheckQuorum    MessageType = 12
-	MsgTransferLeader MessageType = 13
-	MsgTimeoutNow     MessageType = 14
-	MsgReadIndex      MessageType = 15
-	MsgReadIndexResp  MessageType = 16
-	MsgPreVote        MessageType = 17
-	MsgPreVoteResp    MessageType = 18
+	MsgHup                 MessageType = 0
+	MsgBeat                MessageType = 1
+	MsgProp                MessageType = 2
+	MsgApp                 MessageType = 3
+	MsgAppResp             MessageType = 4
+	MsgVote                MessageType = 5
+	MsgVoteResp            MessageType = 6
+	MsgSnap                MessageType = 7
+	MsgHeartbeat           MessageType = 8
+	MsgHeartbeatResp       MessageType = 9
+	MsgUnreachable         MessageType = 10
+	MsgSnapStatus          MessageType = 11
+	MsgCheckQuorum         MessageType = 12
+	MsgTransferLeader      MessageType = 13
+	MsgTimeoutNow          MessageType = 14
+	MsgReadIndex           MessageType = 15
+	MsgReadIndexResp       MessageType = 16
+	MsgPreVote             MessageType = 17
+	MsgPreVoteResp         MessageType = 18
+	MsgSaucrNormal         MessageType = 40
+	MsgSaucrNormalResp     MessageType = 41
+	MsgSaucrSheltering     MessageType = 42
+	MsgSaucrShelteringResp MessageType = 43
 )
 
 var MessageType_name = map[int32]string{
@@ -124,27 +128,36 @@ var MessageType_name = map[int32]string{
 	16: "MsgReadIndexResp",
 	17: "MsgPreVote",
 	18: "MsgPreVoteResp",
+	40: "MsgSaucrNormal",
+	41: "MsgSaucrNormalResp",
+	42: "MsgSaucrSheltering",
+	43: "MsgSaucrShelteringResp",
 }
+
 var MessageType_value = map[string]int32{
-	"MsgHup":            0,
-	"MsgBeat":           1,
-	"MsgProp":           2,
-	"MsgApp":            3,
-	"MsgAppResp":        4,
-	"MsgVote":           5,
-	"MsgVoteResp":       6,
-	"MsgSnap":           7,
-	"MsgHeartbeat":      8,
-	"MsgHeartbeatResp":  9,
-	"MsgUnreachable":    10,
-	"MsgSnapStatus":     11,
-	"MsgCheckQuorum":    12,
-	"MsgTransferLeader": 13,
-	"MsgTimeoutNow":     14,
-	"MsgReadIndex":      15,
-	"MsgReadIndexResp":  16,
-	"MsgPreVote":        17,
-	"MsgPreVoteResp":    18,
+	"MsgHup":                 0,
+	"MsgBeat":                1,
+	"MsgProp":                2,
+	"MsgApp":                 3,
+	"MsgAppResp":             4,
+	"MsgVote":                5,
+	"MsgVoteResp":            6,
+	"MsgSnap":                7,
+	"MsgHeartbeat":           8,
+	"MsgHeartbeatResp":       9,
+	"MsgUnreachable":         10,
+	"MsgSnapStatus":          11,
+	"MsgCheckQuorum":         12,
+	"MsgTransferLeader":      13,
+	"MsgTimeoutNow":          14,
+	"MsgReadIndex":           15,
+	"MsgReadIndexResp":       16,
+	"MsgPreVote":             17,
+	"MsgPreVoteResp":         18,
+	"MsgSaucrNormal":         40,
+	"MsgSaucrNormalResp":     41,
+	"MsgSaucrSheltering":     42,
+	"MsgSaucrShelteringResp": 43,
 }
 
 func (x MessageType) Enum() *MessageType {

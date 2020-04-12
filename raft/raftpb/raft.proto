@@ -53,6 +53,10 @@ enum MessageType {
 	MsgReadIndexResp   = 16;
 	MsgPreVote         = 17;
 	MsgPreVoteResp     = 18;
+	MsgSaucrNormal = 40;
+	MsgSaucrNormalResp = 41;
+	MsgSaucrSheltering = 42;
+	MsgSaucrShelteringResp = 43;
 }
 
 message Message {
