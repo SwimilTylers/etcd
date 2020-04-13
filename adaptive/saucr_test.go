@@ -691,18 +691,13 @@ func TestStateSwitch(t *testing.T) {
 	// 1. NL -> UL
 	// 2. NL -> NF
 
-	/*
-		tested in TestLeaderDetection
-
-		machine, _ := NewSaucrMonitor(nil, CautiousHbCounterFactory, nLeaderCfg)
-		if machine.IsCritical() {
-			t.Error("NL initialization failed")
-		}
-		SaucrSeqFailureChecker(machine, SaucrSeqMonotonicChangeExpectation(machine.self, machine.leader, machine.peers, 3, "fail"), t)
-
-	*/
-
 	machine, _ := NewSaucrMonitor(nil, CautiousHbCounterFactory, nLeaderCfg)
+	if machine.IsCritical() {
+		t.Error("NL initialization failed")
+	}
+	SaucrSeqFailureChecker(machine, SaucrSeqMonotonicChangeExpectation(machine.self, machine.leader, machine.peers, 3, "fail"), t)
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, nLeaderCfg)
 	if machine.IsCritical() {
 		t.Error("NL initialization failed")
 	}
@@ -717,16 +712,11 @@ func TestStateSwitch(t *testing.T) {
 	// 1. UL -> NL
 	// 2. UL -> UF
 
-	/*
-		tested in TestLeaderDetection
-
-		machine, _ := NewSaucrMonitor(nil, CautiousHbCounterFactory, uLeaderCfg)
-		if !machine.IsCritical() {
-			t.Error("NL initialization failed")
-		}
-		SaucrSeqRecoveryChecker(machine, SaucrSeqMonotonicChangeExpectation(machine.self, machine.leader, machine.peers, 3, "recover"), t)
-
-	*/
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uLeaderCfg)
+	if !machine.IsCritical() {
+		t.Error("NL initialization failed")
+	}
+	SaucrSeqRecoveryChecker(machine, SaucrSeqMonotonicChangeExpectation(machine.self, machine.leader, machine.peers, 4, "recover"), t)
 
 	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uLeaderCfg)
 	if !machine.IsCritical() {
@@ -845,21 +835,21 @@ func SaucrSeqMonotonicChangeExpectation(self uint64, leader uint64, peers []uint
 	case "fail":
 		healthy := make([]bool, b+1)
 		for i := 0; i < b+1; i++ {
-			healthy[i] = true
+			healthy[i] = false
 		}
 
 		ill := make([]bool, b+1)
 		for i := 0; i < b+1; i++ {
 			if i < b-1 {
-				ill[i] = true
-			} else {
 				ill[i] = false
+			} else {
+				ill[i] = true
 			}
 		}
 
 		dead := make([]bool, b+1)
 		for i := 0; i < b+1; i++ {
-			dead[i] = false
+			dead[i] = true
 		}
 
 		failed := 0
@@ -882,21 +872,21 @@ func SaucrSeqMonotonicChangeExpectation(self uint64, leader uint64, peers []uint
 	case "recover":
 		healthy := make([]bool, b+1)
 		for i := 0; i < b+1; i++ {
-			healthy[i] = true
+			healthy[i] = false
 		}
 
 		recovered := make([]bool, b+1)
 		for i := 0; i < b+1; i++ {
 			if i < b-1 {
-				recovered[i] = false
-			} else {
 				recovered[i] = true
+			} else {
+				recovered[i] = false
 			}
 		}
 
 		dead := make([]bool, b+1)
 		for i := 0; i < b+1; i++ {
-			dead[i] = false
+			dead[i] = true
 		}
 
 		failed := len(peers) - 1
@@ -904,9 +894,9 @@ func SaucrSeqMonotonicChangeExpectation(self uint64, leader uint64, peers []uint
 		for i := 0; i < len(expected); i++ {
 			if peers[i] != self {
 				failed--
-				if failed < (len(peers)-1)/2 {
+				if failed < (len(peers)-1)/2-1 {
 					expected[i] = healthy
-				} else if failed == (len(peers)-1)/2 {
+				} else if failed == (len(peers)-1)/2-1 {
 					expected[i] = recovered
 				} else {
 					expected[i] = dead
@@ -924,7 +914,11 @@ func SaucrSeqMonotonicChangeExpectation(self uint64, leader uint64, peers []uint
 func SaucrSeqFailureChecker(monitor *SaucrMonitor, expected [][]bool, t *testing.T) {
 	for i := 0; i < len(expected); i++ {
 		for j := 0; j < len(expected[i]); j++ {
-
+			monitor.Perceive(monitor.peers[i], false)
+			if monitor.IsCritical() != expected[i][j] {
+				t.Error("saucr seqFailure check error", "@(", i, j, "):", monitor.IsCritical(), "/", expected[i][j])
+				return
+			}
 		}
 	}
 }
@@ -932,7 +926,12 @@ func SaucrSeqFailureChecker(monitor *SaucrMonitor, expected [][]bool, t *testing
 func SaucrSeqRecoveryChecker(monitor *SaucrMonitor, expected [][]bool, t *testing.T) {
 	for i := 0; i < len(expected); i++ {
 		for j := 0; j < len(expected[i]); j++ {
-
+			monitor.Perceive(monitor.peers[i], false)
+			monitor.Perceive(monitor.peers[i], true)
+			if monitor.IsCritical() != expected[i][j] {
+				t.Error("saucr seqRecovery check error", "@(", i, j, "):", monitor.IsCritical(), "/", expected[i][j])
+				return
+			}
 		}
 	}
 }

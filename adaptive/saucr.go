@@ -180,7 +180,7 @@ func (sm *SaucrMonitor) refreshPeersWithOption(peers []uint64, isInitCritical bo
 	sm.peers = peers
 
 	for i := 0; i < len(sm.peers); i++ {
-		sm.hbCounter[i].Init(isInitCritical)
+		sm.hbCounter[i].Init(!isInitCritical)
 		sm.unconnected[i] = isInitCritical
 	}
 
