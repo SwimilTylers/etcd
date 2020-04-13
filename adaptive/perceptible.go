@@ -39,8 +39,21 @@ type Perceptible interface {
 	IsCritical() bool
 }
 
+func SetPerceptibleCritical(p Perceptible, critical bool) error {
+	cfg := p.GetConfig()
+	cfg.Critical = critical
+	return p.SetConfig(cfg)
+}
+
 func SetPerceptibleState(p Perceptible, state raft.StateType) error {
 	cfg := p.GetConfig()
+	cfg.State = state
+	return p.SetConfig(cfg)
+}
+
+func SetPerceptibleCriticalAndState(p Perceptible, critical bool, state raft.StateType) error {
+	cfg := p.GetConfig()
+	cfg.Critical = critical
 	cfg.State = state
 	return p.SetConfig(cfg)
 }

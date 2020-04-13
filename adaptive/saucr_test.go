@@ -3,6 +3,7 @@ package adaptive
 import (
 	"go.etcd.io/etcd/raft"
 	"math/rand"
+	"strings"
 	"testing"
 )
 
@@ -23,7 +24,7 @@ func TestInitializationNonCritical(t *testing.T) {
 	config.Self = config.Peers[selfIdx]
 
 	// 01: non-critical start
-	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(tokenSize), config)
 
 	if !machine.IsCritical() {
 		t.Fatal("01: stay critical before any leader is chosen")
@@ -134,7 +135,7 @@ func TestInitializationCritical(t *testing.T) {
 	config.Self = config.Peers[selfIdx]
 
 	// 01: non-critical start
-	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(tokenSize), config)
 
 	if !machine.IsCritical() {
 		t.Fatal("01: When config.Critical is false, SAUCR should be initialized as critical state")
@@ -290,7 +291,7 @@ func TestLeaderDetection(t *testing.T) {
 	config.Leader = config.Self
 
 	// normal start
-	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(tokenSize), config)
 
 	if machine.IsCritical() {
 		t.Fatal("saucr should be initialized in non-critical mode")
@@ -395,6 +396,10 @@ func TestLeaderDetection(t *testing.T) {
 }
 
 func TestFollowerDetection(t *testing.T) {
+	t.Skip("According to etcd-notes-saucr-implementation.md,",
+		"followers can not detect the leader's connectivity unless through the RaftState change (F->C).",
+	)
+
 	var peerSize = 5
 	var tokenSize = 2
 
@@ -411,7 +416,7 @@ func TestFollowerDetection(t *testing.T) {
 	config.Leader = config.Peers[leaderIdx]
 
 	// normal start
-	machine, _ := NewSaucrMonitor(nil, tokenSize, config)
+	machine, _ := NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(tokenSize), config)
 
 	if machine.IsCritical() {
 		t.Fatal("saucr should be initialized in non-critical mode")
@@ -518,7 +523,7 @@ func TestCandidateDetection(t *testing.T) {
 	config.Leader = raft.None
 
 	// normal start
-	machine, err := NewSaucrMonitor(nil, tokenSize, config)
+	machine, err := NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(tokenSize), config)
 
 	if err == nil {
 		t.Fatal("instantiation should detect illegal field:", err)
@@ -527,7 +532,7 @@ func TestCandidateDetection(t *testing.T) {
 	config.Critical = true
 
 	// normal start
-	machine, _ = NewSaucrMonitor(nil, tokenSize, config)
+	machine, _ = NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(tokenSize), config)
 
 	if !machine.IsCritical() {
 		t.Fatal("saucr should be initialized in critical mode")
@@ -559,7 +564,7 @@ func TestCandidateDetection(t *testing.T) {
 }
 
 func TestModeSwitch(t *testing.T) {
-	machine, _ := NewSaucrMonitor(nil, 2, &PerceptibleConfig{
+	machine, _ := NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(2), &PerceptibleConfig{
 		State:    raft.StateLeader,
 		Critical: false,
 		Peers:    GeneratePeers(5),
@@ -600,7 +605,7 @@ func TestModeSwitch(t *testing.T) {
 		t.Fatal("leader should switch to non-critical")
 	}
 
-	machine, _ = NewSaucrMonitor(nil, 2, &PerceptibleConfig{
+	machine, _ = NewSaucrMonitor(nil, NewSimpleBucketCounterFactory(2), &PerceptibleConfig{
 		State:    raft.StateFollower,
 		Critical: false,
 		Peers:    GeneratePeers(5),
@@ -638,11 +643,169 @@ func TestModeSwitch(t *testing.T) {
 	if machine.IsCritical() {
 		t.Fatal("leader should switch to non-critical")
 	}
+}
 
-	machine.Perceive(machine.leader, false)
+func TestStateSwitch(t *testing.T) {
+	peers := GeneratePeers(5)
+	nLeaderCfg := &PerceptibleConfig{
+		State:    raft.StateLeader,
+		Leader:   peers[0],
+		Self:     peers[0],
+		Critical: false,
+		Peers:    peers,
+	}
 
+	uLeaderCfg := &PerceptibleConfig{
+		State:    raft.StateLeader,
+		Leader:   peers[0],
+		Self:     peers[0],
+		Critical: true,
+		Peers:    peers,
+	}
+
+	nFollowerCfg := &PerceptibleConfig{
+		State:    raft.StateFollower,
+		Leader:   peers[3],
+		Self:     peers[0],
+		Critical: false,
+		Peers:    peers,
+	}
+
+	uFollowerCfg := &PerceptibleConfig{
+		State:    raft.StateFollower,
+		Leader:   peers[3],
+		Self:     peers[0],
+		Critical: true,
+		Peers:    peers,
+	}
+
+	uCandidateCfg := &PerceptibleConfig{
+		State:    raft.StateCandidate,
+		Leader:   raft.None,
+		Self:     peers[0],
+		Critical: true,
+		Peers:    peers,
+	}
+
+	// NL:
+	// 1. NL -> UL
+	// 2. NL -> NF
+
+	/*
+		tested in TestLeaderDetection
+
+		machine, _ := NewSaucrMonitor(nil, CautiousHbCounterFactory, nLeaderCfg)
+		if machine.IsCritical() {
+			t.Error("NL initialization failed")
+		}
+		SaucrSeqFailureChecker(machine, SaucrSeqMonotonicChangeExpectation(machine.self, machine.leader, machine.peers, 3, "fail"), t)
+
+	*/
+
+	machine, _ := NewSaucrMonitor(nil, CautiousHbCounterFactory, nLeaderCfg)
+	if machine.IsCritical() {
+		t.Error("NL initialization failed")
+	}
+	if err := SetPerceptibleLeaderAndState(machine, peers[2], raft.StateFollower); err != nil {
+		t.Fatal("NL->NF failed:", err)
+	}
+	if machine.IsCritical() {
+		t.Error("NL->NF dysfunctional:", "must stay normal")
+	}
+
+	// UL:
+	// 1. UL -> NL
+	// 2. UL -> UF
+
+	/*
+		tested in TestLeaderDetection
+
+		machine, _ := NewSaucrMonitor(nil, CautiousHbCounterFactory, uLeaderCfg)
+		if !machine.IsCritical() {
+			t.Error("NL initialization failed")
+		}
+		SaucrSeqRecoveryChecker(machine, SaucrSeqMonotonicChangeExpectation(machine.self, machine.leader, machine.peers, 3, "recover"), t)
+
+	*/
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uLeaderCfg)
 	if !machine.IsCritical() {
-		t.Fatal("leader should switch to critical")
+		t.Error("UL initialization failed")
+	}
+	if err := SetPerceptibleLeaderAndState(machine, peers[2], raft.StateFollower); err != nil {
+		t.Fatal("UL->UF failed:", err)
+	}
+	if !machine.IsCritical() {
+		t.Error("UL->UF dysfunctional:", "must stay critical")
+	}
+
+	// NF:
+	// 1. NF -> C
+	// 2. NF -> UF
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, nFollowerCfg)
+	if machine.IsCritical() {
+		t.Error("NF initialization failed")
+	}
+	if err := SetPerceptibleCriticalAndState(machine, true, raft.StateCandidate); err != nil {
+		t.Fatal("NF->C failed:", err)
+	}
+	if !machine.IsCritical() {
+		t.Error("NF->C dysfunctional:", "must be critical")
+	}
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, nFollowerCfg)
+	if err := SetPerceptibleCritical(machine, true); err != nil {
+		t.Fatal("NF->UF failed:", err)
+	}
+	if !machine.IsCritical() {
+		t.Error("NF->UF dysfunctional:", "switch to critical after SAUCR_SHELTERING")
+	}
+
+	// UF:
+	// 1. UF -> C
+	// 2. UF -> NF
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uFollowerCfg)
+	if !machine.IsCritical() {
+		t.Error("UF initialization failed")
+	}
+	if err := SetPerceptibleCriticalAndState(machine, true, raft.StateCandidate); err != nil {
+		t.Fatal("UF->C failed:", err)
+	}
+	if !machine.IsCritical() {
+		t.Error("UF->C dysfunctional:", "must be critical")
+	}
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uFollowerCfg)
+	if err := SetPerceptibleCritical(machine, false); err != nil {
+		t.Fatal("UF->NF failed:", err)
+	}
+	if machine.IsCritical() {
+		t.Error("UF->NF dysfunctional:", "switch to normal after SAUCR_NORMAL")
+	}
+
+	// C:
+	// 1. C -> UL
+	// 2. C -> UF
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uCandidateCfg)
+	if !machine.IsCritical() {
+		t.Error("C initialization failed")
+	}
+	if err := SetPerceptibleLeaderAndState(machine, machine.self, raft.StateLeader); err != nil {
+		t.Fatal("C->UL failed:", err)
+	}
+	if !machine.IsCritical() {
+		t.Error("C->UL dysfunctional:", "must stay critical")
+	}
+
+	machine, _ = NewSaucrMonitor(nil, CautiousHbCounterFactory, uCandidateCfg)
+	if err := SetPerceptibleState(machine, raft.StateFollower); err != nil {
+		t.Fatal("C->UF failed:", err)
+	}
+	if !machine.IsCritical() {
+		t.Error("C->UF dysfunctional:", "must stay critical")
 	}
 }
 
@@ -669,4 +832,107 @@ func GeneratePeers(peerSize int) []uint64 {
 		}
 	}
 	return peers
+}
+
+func SaucrSeqMonotonicChangeExpectation(self uint64, leader uint64, peers []uint64, b int, direction string) [][]bool {
+	if self != leader {
+		return nil
+	}
+
+	expected := make([][]bool, len(peers))
+
+	switch strings.ToLower(direction) {
+	case "fail":
+		healthy := make([]bool, b+1)
+		for i := 0; i < b+1; i++ {
+			healthy[i] = true
+		}
+
+		ill := make([]bool, b+1)
+		for i := 0; i < b+1; i++ {
+			if i < b-1 {
+				ill[i] = true
+			} else {
+				ill[i] = false
+			}
+		}
+
+		dead := make([]bool, b+1)
+		for i := 0; i < b+1; i++ {
+			dead[i] = false
+		}
+
+		failed := 0
+
+		for i := 0; i < len(expected); i++ {
+			if peers[i] != self {
+				failed++
+				if failed < (len(peers)-1)/2 {
+					expected[i] = healthy
+				} else if failed == (len(peers)-1)/2 {
+					expected[i] = ill
+				} else {
+					expected[i] = dead
+				}
+			} else {
+				expected[i] = []bool{}
+			}
+		}
+		return expected
+	case "recover":
+		healthy := make([]bool, b+1)
+		for i := 0; i < b+1; i++ {
+			healthy[i] = true
+		}
+
+		recovered := make([]bool, b+1)
+		for i := 0; i < b+1; i++ {
+			if i < b-1 {
+				recovered[i] = false
+			} else {
+				recovered[i] = true
+			}
+		}
+
+		dead := make([]bool, b+1)
+		for i := 0; i < b+1; i++ {
+			dead[i] = false
+		}
+
+		failed := len(peers) - 1
+
+		for i := 0; i < len(expected); i++ {
+			if peers[i] != self {
+				failed--
+				if failed < (len(peers)-1)/2 {
+					expected[i] = healthy
+				} else if failed == (len(peers)-1)/2 {
+					expected[i] = recovered
+				} else {
+					expected[i] = dead
+				}
+			} else {
+				expected[i] = []bool{}
+			}
+		}
+		return expected
+	default:
+		return nil
+	}
+}
+
+func SaucrSeqFailureChecker(monitor *SaucrMonitor, expected [][]bool, t *testing.T) {
+	for i := 0; i < len(expected); i++ {
+		for j := 0; j < len(expected[i]); j++ {
+
+		}
+	}
+}
+
+func SaucrSeqRecoveryChecker(monitor *SaucrMonitor, expected [][]bool, t *testing.T) {
+	for i := 0; i < len(expected); i++ {
+		for j := 0; j < len(expected[i]); j++ {
+
+		}
+	}
 }

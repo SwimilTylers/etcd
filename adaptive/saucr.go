@@ -18,11 +18,11 @@ type SaucrMonitor struct {
 	self   uint64
 	state  raft.StateType
 
-	maxToken int
-
 	peers       []uint64
 	unconnected []bool
-	reporter    []*TokenBucketReporter
+	hbCounter   []HeartbeatCounter
+
+	hbCounterFactory func() HeartbeatCounter
 
 	threshold int
 
@@ -41,18 +41,10 @@ func (sm *SaucrMonitor) String() string {
 	)
 
 	for i := 0; i < len(sm.peers); i++ {
-		buffer.WriteString(fmt.Sprintf("\t%04x[unconn=%v]: %s \n", sm.peers[i], sm.unconnected[i], sm.reporter[i]))
+		buffer.WriteString(fmt.Sprintf("\t%04x[unconn=%v]: %s \n", sm.peers[i], sm.unconnected[i], sm.hbCounter[i]))
 	}
 
 	return buffer.String()
-}
-
-func (sm *SaucrMonitor) MaxToken() int {
-	return sm.maxToken
-}
-
-func (sm *SaucrMonitor) SetMaxToken(maxToken int) {
-	sm.maxToken = maxToken
 }
 
 func (sm *SaucrMonitor) GetConfig() *PerceptibleConfig {
@@ -126,12 +118,12 @@ func (sm *SaucrMonitor) Perceive(id uint64, isConnected bool) {
 	var index = sm.findIndex(id)
 	if index != -1 {
 		if isConnected {
-			sm.reporter[index].Positive()
+			sm.hbCounter[index].Positive()
 		} else {
-			sm.reporter[index].Negative()
+			sm.hbCounter[index].Negative()
 		}
 
-		sm.unconnected[index] = !sm.reporter[index].Report()
+		sm.unconnected[index] = !sm.hbCounter[index].Report()
 
 	} else if sm.logger != nil {
 		sm.logger.Warn(
@@ -176,12 +168,19 @@ func (sm *SaucrMonitor) refreshPeersWithOption(peers []uint64, isInitCritical bo
 		return errors.New("monitor is refreshed by peer list with length < 3")
 	}
 
+	if sm.peers == nil || len(sm.peers) != len(peers) {
+		sm.unconnected = make([]bool, len(peers))
+		sm.hbCounter = make([]HeartbeatCounter, len(peers))
+
+		for i := 0; i < len(sm.hbCounter); i++ {
+			sm.hbCounter[i] = sm.hbCounterFactory()
+		}
+	}
+
 	sm.peers = peers
 
-	sm.unconnected = make([]bool, len(sm.peers))
-	sm.reporter = make([]*TokenBucketReporter, len(sm.peers))
 	for i := 0; i < len(sm.peers); i++ {
-		sm.reporter[i] = &TokenBucketReporter{maxToken: sm.maxToken}
+		sm.hbCounter[i].Init(isInitCritical)
 		sm.unconnected[i] = isInitCritical
 	}
 
@@ -236,8 +235,8 @@ func (sm *SaucrMonitor) evaluate() bool {
 	}
 }
 
-func NewSaucrMonitor(logger *zap.Logger, maxConnToken int, config *PerceptibleConfig) (*SaucrMonitor, error) {
-	ret := &SaucrMonitor{logger: logger, mu: sync.Mutex{}, maxToken: maxConnToken}
+func NewSaucrMonitor(logger *zap.Logger, hbCounterFactory func() HeartbeatCounter, config *PerceptibleConfig) (*SaucrMonitor, error) {
+	ret := &SaucrMonitor{logger: logger, mu: sync.Mutex{}, hbCounterFactory: hbCounterFactory}
 	if err := ret.SetConfig(config); err != nil {
 		return nil, err
 	} else {
