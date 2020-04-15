@@ -29,6 +29,7 @@ type SaucrRaftNode struct {
 
 	peers []uint64
 	self  uint64
+	term  uint64
 
 	// PeerMonitor perceives the connectivity of peers and decides
 	// whether to switch between fast-but-not-reliable mode and
@@ -62,12 +63,16 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 	go func() {
 		defer srn.onStop()
 		isLead := false
+		isFollower := true
 
 		for {
 			select {
 			case <-srn.ticker.C:
 				srn.tick()
 			case rd := <-srn.Ready():
+				var pMonitorCfg *adaptive.PerceptibleConfig
+				var pManagerStg *adaptive.PersistentStrategy
+
 				if rd.SoftState != nil {
 					newLeader := rd.SoftState.Lead != raft.None && rh.getLead() != rd.SoftState.Lead
 					if newLeader {
@@ -82,6 +87,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 
 					rh.updateLead(rd.SoftState.Lead)
 					isLead = rd.RaftState == raft.StateLeader
+					isFollower = rd.RaftState == raft.StateFollower
 					if isLead {
 						isLeader.Set(1)
 					} else {
@@ -90,8 +96,35 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 					rh.updateLeadership(newLeader)
 					srn.td.Reset()
 
-					// refresh PeerMonitor's state
-					srn.updatePeerMonitorFromReady(rd)
+					// update pMonitor with SoftState
+					// Read etcd-notes-saucr-implementation.md for more information
+					pMonitorCfg = srn.updatePMonitorSoft(srn.PeerMonitor.GetConfig(), rd.RaftState, rh.getLead())
+				}
+
+				// update PMonitor with HardState
+				// Read etcd-notes-saucr-implementation.md for more information
+				if isFollower {
+					pMonitorCfg = srn.updatePMonitorHard(pMonitorCfg, rd.HardState)
+				} else {
+					srn.DropMsgSaucr()
+				}
+
+				// apply pMonitor's cfg changes
+
+				if pMonitorCfg != nil {
+					if err := srn.PeerMonitor.SetConfig(pMonitorCfg); err != nil {
+						if srn.lg != nil {
+							srn.lg.Fatal(
+								"failed to transform the mode of PMonitor",
+								zap.Error(err),
+								zap.Bool("is-leader", isLead),
+								zap.Bool("is-follower", isFollower),
+								zap.String("cfg", fmt.Sprintf("%+v", pMonitorCfg)),
+							)
+						} else {
+							plog.Fatalf("failed to transform the mode of PMonitor: %v", err)
+						}
+					}
 				}
 
 				if len(rd.ReadStates) != 0 {
@@ -123,58 +156,51 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 					return
 				}
 
+				// update srn and PManager's mode
+				// If srn does not change its mode yet, PManager will not either.
+				pManagerStg = srn.updatePManagerMode(pMonitorCfg)
+
 				// the leader can write to its disk in parallel with replicating to the followers and them
 				// writing to their disks.
 				// For more details, check raft thesis 10.2.1
 				if isLead {
 					// gofail: var raftBeforeLeaderSend struct{}
 					srn.transport.Send(srn.processMessages(rd.Messages))
-					isCritical := srn.PeerMonitor.IsCritical()
 
-					if isCritical && srn.currentMode == NORMAL {
-						srn.currentMode = SHELTERING
-						oldStrategy := srn.PManager.GetStrategy()
-						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
-							Fsync:             true,
-							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
-							CachePreserveTime: oldStrategy.CachePreserveTime,
-						})
+					// broadcast
+					if pMonitorCfg != nil {
+						srn.transport.Send(srn.broadcastCurrentMode(pMonitorCfg, srn.term))
+					}
+				}
 
-						if err != nil {
-							if srn.lg != nil {
-								srn.lg.Fatal(
-									"failed to transform the mode of PersistentManager",
-									zap.Error(err),
-									zap.Bool("is-leader", true),
-									zap.String("mode", "NORMAL -> SHELTERING"),
-									zap.Int("pm-local-cache-size", oldStrategy.MaxLocalCacheSize),
-									zap.String("pm-cache-preserve-time", oldStrategy.CachePreserveTime.String()),
-								)
-							} else {
-								plog.Fatalf("failed to transform the mode of PersistentManager: %v", err)
-							}
+				// apply pManager's stg changes
+				// Meanwhile, if switch to fsync, it is necessary to flush all buffered entries
+				if pManagerStg != nil {
+					if err := srn.PManager.SetStrategy(pManagerStg); err != nil {
+						if srn.lg != nil {
+							srn.lg.Fatal(
+								"failed to transform the mode of PManager",
+								zap.Error(err),
+								zap.Bool("is-leader", isLead),
+								zap.Bool("is-follower", isFollower),
+								zap.String("stg", fmt.Sprintf("%+v", pManagerStg)),
+							)
+						} else {
+							plog.Fatalf("failed to transform the mode of PManager: %v", err)
 						}
-					} else if !isCritical && srn.currentMode == SHELTERING {
-						srn.currentMode = NORMAL
-						oldStrategy := srn.PManager.GetStrategy()
-						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
-							Fsync:             false,
-							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
-							CachePreserveTime: oldStrategy.CachePreserveTime,
-						})
 
-						if err != nil {
-							if srn.lg != nil {
-								srn.lg.Fatal(
-									"failed to transform the mode of PersistentManager",
-									zap.Error(err),
-									zap.Bool("is-leader", true),
-									zap.String("mode", "SHELTERING -> NORMAL"),
-									zap.Int("pm-local-cache-size", oldStrategy.MaxLocalCacheSize),
-									zap.String("pm-cache-preserve-time", oldStrategy.CachePreserveTime.String()),
-								)
-							} else {
-								plog.Fatalf("failed to transform the mode of PersistentManager: %v", err)
+						if pManagerStg.Fsync {
+							if err := srn.PManager.Flush(); err != nil {
+								if srn.lg != nil {
+									srn.lg.Fatal(
+										"failed to flush PManager's buffer",
+										zap.Error(err),
+										zap.Bool("is-leader", isLead),
+										zap.Bool("is-follower", isFollower),
+									)
+								} else {
+									plog.Fatalf("failed to flush PManager's buffer: %v", err)
+								}
 							}
 						}
 					}
@@ -200,10 +226,9 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 				}
 				// gofail: var raftAfterSave struct{}
 
-				// TODO(similtylers): deal with snapshot
 				if !raft.IsEmptySnap(rd.Snapshot) {
 					// gofail: var raftBeforeSaveSnap struct{}
-					if err := srn.storage.SaveSnap(rd.Snapshot); err != nil {
+					if err := srn.PManager.SaveSnap(rd.Snapshot); err != nil {
 						if srn.lg != nil {
 							srn.lg.Fatal("failed to save Raft snapshot", zap.Error(err))
 						} else {
@@ -259,72 +284,6 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 
 					// gofail: var raftBeforeFollowerSend struct{}
 					srn.transport.Send(msgs)
-
-					isCritical := srn.PeerMonitor.IsCritical()
-
-					if isCritical && srn.currentMode == NORMAL {
-						srn.currentMode = SHELTERING
-						oldStrategy := srn.PManager.GetStrategy()
-						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
-							Fsync:             true,
-							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
-							CachePreserveTime: oldStrategy.CachePreserveTime,
-						})
-
-						if err != nil {
-							if srn.lg != nil {
-								srn.lg.Fatal(
-									"failed to transform the mode of PersistentManager",
-									zap.Error(err),
-									zap.Bool("is-leader", false),
-									zap.String("mode", "NORMAL -> SHELTERING"),
-									zap.Int("pm-local-cache-size", oldStrategy.MaxLocalCacheSize),
-									zap.String("pm-cache-preserve-time", oldStrategy.CachePreserveTime.String()),
-								)
-							} else {
-								plog.Fatalf("failed to transform the mode of PersistentManager: %v", err)
-							}
-						}
-
-						// flush all the cached
-						if err := srn.PManager.Flush(); err != nil {
-							if srn.lg != nil {
-								s := srn.PManager.GetStrategy()
-								srn.lg.Fatal(
-									"failed to flush cached hardState and entries",
-									zap.Error(err),
-									zap.String("mode", "NORMAL -> SHELTERING"),
-									zap.Int("pm-local-cache-size", s.MaxLocalCacheSize),
-									zap.String("pm-cache-preserve-time", s.CachePreserveTime.String()),
-								)
-							} else {
-								plog.Fatalf("flush cached hardState and entries error: %v", err)
-							}
-						}
-					} else if !isCritical && srn.currentMode == SHELTERING {
-						srn.currentMode = NORMAL
-						oldStrategy := srn.PManager.GetStrategy()
-						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
-							Fsync:             false,
-							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
-							CachePreserveTime: oldStrategy.CachePreserveTime,
-						})
-
-						if err != nil {
-							if srn.lg != nil {
-								srn.lg.Fatal(
-									"failed to transform the mode of PersistentManager",
-									zap.Error(err),
-									zap.Bool("is-leader", false),
-									zap.String("mode", "SHELTERING -> NORMAL"),
-									zap.Int("pm-local-cache-size", oldStrategy.MaxLocalCacheSize),
-									zap.String("pm-cache-preserve-time", oldStrategy.CachePreserveTime.String()),
-								)
-							} else {
-								plog.Fatalf("failed to transform the mode of PersistentManager: %v", err)
-							}
-						}
-					}
 				} else {
 					// leader already processed 'MsgSnap' and signaled
 					notifyc <- struct{}{}
@@ -389,6 +348,32 @@ func (srn *SaucrRaftNode) processMessages(ms []raftpb.Message) []raftpb.Message 
 	return ms
 }
 
+func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PerceptibleConfig, term uint64) []raftpb.Message {
+	if cfg != nil {
+		var mType raftpb.MessageType
+		if cfg.Critical {
+			mType = raftpb.MsgSaucrSheltering
+		} else {
+			mType = raftpb.MsgSaucrNormal
+		}
+		msg := make([]raftpb.Message, len(cfg.Peers)-1)
+		count := 0
+		for _, peer := range cfg.Peers {
+			if peer != cfg.Self {
+				msg[count] = raftpb.Message{
+					Type: mType,
+					To:   peer,
+					From: cfg.Self,
+					Term: term,
+				}
+			}
+		}
+		return msg
+	} else {
+		return nil
+	}
+}
+
 func (srn *SaucrRaftNode) updatePeerMonitorFromReady(rd raft.Ready) {
 	if rd.RaftState == raft.StateLeader || rd.RaftState == raft.StateFollower {
 		critical := srn.PeerMonitor.IsCritical()
@@ -451,6 +436,7 @@ func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, st
 
 func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h raftpb.HardState) *adaptive.PerceptibleConfig {
 	if !raft.IsEmptyHardState(h) {
+		srn.term = h.Term
 		if msg, ok := srn.GetExactlyAndDropMsgSaucr(h.Term); ok {
 			if cfg == nil {
 				cfg = srn.PeerMonitor.GetConfig()
