@@ -255,7 +255,7 @@ func (lcd *LocalCachedDisk) RemoveRemoteDisk(desc *adaptive.PersistentRemoteDesc
 	return errors.New("unsupported operation")
 }
 
-func NewLocalDisk(logger *zap.Logger, disk Storage, config *adaptive.PersistentConfig) *LocalCachedDisk {
+func NewLocalCachedDisk(logger *zap.Logger, disk Storage, config *adaptive.PersistentConfig) *LocalCachedDisk {
 	ret := &LocalCachedDisk{
 		logger:                logger,
 		mu:                    sync.Mutex{},

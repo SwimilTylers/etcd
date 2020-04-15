@@ -279,7 +279,7 @@ func GenerateStorage(fsync bool, waitMillis int, cacheSize int, buffered bool) (
 		saved = make(chan *dummyDiskIssue)
 	}
 
-	return strat, saved, NewLocalDisk(nil, &dummyDisk{sync.Mutex{}, saved, false}, config)
+	return strat, saved, NewLocalCachedDisk(nil, &dummyDisk{sync.Mutex{}, saved, false}, config)
 }
 
 func GenerateEntries() (raftpb.HardState, []raftpb.Entry) {
