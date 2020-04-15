@@ -12,18 +12,18 @@ import (
 const (
 	// NORMAL MODE means that current peer network works fine.
 	//
-	// Therefore, SaucrNode should prefer performance and reduce
+	// Therefore, AdaNode should prefer performance and reduce
 	// the frequency of persistent operations.
 	NORMAL uint8 = iota
 
 	// SHELTERING MODE means that current peer network is at stake.
 	//
-	// Therefore, SaucrNode should prefer reliability and insists to
+	// Therefore, AdaNode should prefer reliability and insists to
 	// persist.
 	SHELTERING
 )
 
-type SaucrNode struct {
+type AdaNode struct {
 	raftNode
 
 	peers []uint64
@@ -33,7 +33,10 @@ type SaucrNode struct {
 	// whether to switch between fast-but-not-reliable mode and
 	// slow-but-reliable mode.
 	//
-	// To be more specific: see etcd-notes-saucr-implementation.md
+	// To be more specific:
+	//   1. PeerMonitor perceives connectivity from the result of heartbeat
+	//   2. When SaucrMonitor.IsCritical is true, running in slow mode
+	//   3. When SoftState changes, PeerMonitor has to reset
 	PeerMonitor adaptive.Perceptible
 
 	// currentMode: NORMAL or SHELTERING
@@ -46,13 +49,12 @@ type SaucrNode struct {
 
 // start prepares and starts raftNode in a new goroutine. It is no longer safe
 // to modify the fields after it has been started.
-func (an *SaucrNode) start(rh *raftReadyHandler) {
+func (an *AdaNode) start(rh *raftReadyHandler) {
 	internalTimeout := time.Second
 
 	go func() {
 		defer an.onStop()
 		isLead := false
-		// isFollower := true
 
 		for {
 			select {
@@ -144,18 +146,6 @@ func (an *SaucrNode) start(rh *raftReadyHandler) {
 							} else {
 								plog.Fatalf("failed to transform the mode of PersistentManager: %v", err)
 							}
-						} else {
-							if an.lg != nil {
-								an.lg.Info("the mode of PersistentManager has transformed",
-									zap.Bool("is-leader", true),
-									zap.String("mode", "NORMAL -> SHELTERING"),
-									zap.Int("pm-local-cache-size", oldStrategy.MaxLocalCacheSize),
-									zap.String("pm-cache-preserve-time", oldStrategy.CachePreserveTime.String()),
-								)
-							} else {
-								plog.Info("transformed the mode of PersistentManager")
-							}
-
 						}
 					} else if !isCritical && an.currentMode == SHELTERING {
 						an.currentMode = NORMAL
@@ -185,9 +175,13 @@ func (an *SaucrNode) start(rh *raftReadyHandler) {
 
 				if err := an.PManager.Save(rd.HardState, rd.Entries); err != nil {
 					if an.lg != nil {
+						s := an.PManager.GetStrategy()
 						an.lg.Fatal(
 							"failed to save Raft hard state and entries",
 							zap.Error(err),
+							zap.String("mode", "NORMAL -> SHELTERING"),
+							zap.Int("pm-local-cache-size", s.MaxLocalCacheSize),
+							zap.String("pm-cache-preserve-time", s.CachePreserveTime.String()),
 						)
 					} else {
 						plog.Fatalf("raft save state and entries error: %v", err)
@@ -337,7 +331,7 @@ func (an *SaucrNode) start(rh *raftReadyHandler) {
 	}()
 }
 
-func (an *SaucrNode) processMessages(ms []raftpb.Message) []raftpb.Message {
+func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 	sentAppResp := false
 	for i := len(ms) - 1; i >= 0; i-- {
 		if an.isIDRemoved(ms[i].To) {
@@ -427,7 +421,7 @@ func (an *AdaNode) updatePeerMonitorFromReady(rd raft.Ready) {
 }
 
 func NewAdaNode(r raftNode, peers []uint64) *AdaNode {
-	monitor, err := adaptive.NewSaucrMonitor(r.lg, 5, &adaptive.PerceptibleConfig{
+	monitor, err := adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, &adaptive.PerceptibleConfig{
 		State:    raft.StateFollower,
 		Leader:   raft.None,
 		Critical: false,
@@ -447,6 +441,6 @@ func NewAdaNode(r raftNode, peers []uint64) *AdaNode {
 		self:        0,
 		PeerMonitor: monitor,
 		currentMode: NORMAL,
-		PManager:    NewLocalDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: adaptive.DefaultStrategy}),
+		PManager:    NewLocalCachedDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: adaptive.DefaultStrategy}),
 	}
 }
