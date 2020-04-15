@@ -6,24 +6,25 @@ import (
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
+	"sync"
 	"time"
 )
 
 const (
 	// NORMAL MODE means that current peer network works fine.
 	//
-	// Therefore, AdaNode should prefer performance and reduce
+	// Therefore, SaucrRaftNode should prefer performance and reduce
 	// the frequency of persistent operations.
 	NORMAL uint8 = iota
 
 	// SHELTERING MODE means that current peer network is at stake.
 	//
-	// Therefore, AdaNode should prefer reliability and insists to
+	// Therefore, SaucrRaftNode should prefer reliability and insists to
 	// persist.
 	SHELTERING
 )
 
-type AdaNode struct {
+type SaucrRaftNode struct {
 	raftNode
 
 	peers []uint64
@@ -45,22 +46,28 @@ type AdaNode struct {
 	// PManager is a wrapper Storage with a memory cache.
 	// It can switch between on-cache mode and must-persist mode according to its fsync flag.
 	PManager adaptive.PersistentManager
+
+	// MsgSaucr related fields
+	msgSaucrMu      sync.Mutex
+	msgSaucrEmpty   bool
+	msgSaucrTerm    uint64
+	msgSaucrMessage raftpb.Message
 }
 
 // start prepares and starts raftNode in a new goroutine. It is no longer safe
 // to modify the fields after it has been started.
-func (an *AdaNode) start(rh *raftReadyHandler) {
+func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 	internalTimeout := time.Second
 
 	go func() {
-		defer an.onStop()
+		defer srn.onStop()
 		isLead := false
 
 		for {
 			select {
-			case <-an.ticker.C:
-				an.tick()
-			case rd := <-an.Ready():
+			case <-srn.ticker.C:
+				srn.tick()
+			case rd := <-srn.Ready():
 				if rd.SoftState != nil {
 					newLeader := rd.SoftState.Lead != raft.None && rh.getLead() != rd.SoftState.Lead
 					if newLeader {
@@ -81,22 +88,22 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 						isLeader.Set(0)
 					}
 					rh.updateLeadership(newLeader)
-					an.td.Reset()
+					srn.td.Reset()
 
 					// refresh PeerMonitor's state
-					an.updatePeerMonitorFromReady(rd)
+					srn.updatePeerMonitorFromReady(rd)
 				}
 
 				if len(rd.ReadStates) != 0 {
 					select {
-					case an.readStateC <- rd.ReadStates[len(rd.ReadStates)-1]:
+					case srn.readStateC <- rd.ReadStates[len(rd.ReadStates)-1]:
 					case <-time.After(internalTimeout):
-						if an.lg != nil {
-							an.lg.Warn("timed out sending read state", zap.Duration("timeout", internalTimeout))
+						if srn.lg != nil {
+							srn.lg.Warn("timed out sending read state", zap.Duration("timeout", internalTimeout))
 						} else {
 							plog.Warningf("timed out sending read state")
 						}
-					case <-an.stopped:
+					case <-srn.stopped:
 						return
 					}
 				}
@@ -111,8 +118,8 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 				updateCommittedIndex(&ap, rh)
 
 				select {
-				case an.applyc <- ap:
-				case <-an.stopped:
+				case srn.applyc <- ap:
+				case <-srn.stopped:
 					return
 				}
 
@@ -121,21 +128,21 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 				// For more details, check raft thesis 10.2.1
 				if isLead {
 					// gofail: var raftBeforeLeaderSend struct{}
-					an.transport.Send(an.processMessages(rd.Messages))
-					isCritical := an.PeerMonitor.IsCritical()
+					srn.transport.Send(srn.processMessages(rd.Messages))
+					isCritical := srn.PeerMonitor.IsCritical()
 
-					if isCritical && an.currentMode == NORMAL {
-						an.currentMode = SHELTERING
-						oldStrategy := an.PManager.GetStrategy()
-						err := an.PManager.SetStrategy(&adaptive.PersistentStrategy{
+					if isCritical && srn.currentMode == NORMAL {
+						srn.currentMode = SHELTERING
+						oldStrategy := srn.PManager.GetStrategy()
+						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
 							Fsync:             true,
 							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
 							CachePreserveTime: oldStrategy.CachePreserveTime,
 						})
 
 						if err != nil {
-							if an.lg != nil {
-								an.lg.Fatal(
+							if srn.lg != nil {
+								srn.lg.Fatal(
 									"failed to transform the mode of PersistentManager",
 									zap.Error(err),
 									zap.Bool("is-leader", true),
@@ -147,18 +154,18 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 								plog.Fatalf("failed to transform the mode of PersistentManager: %v", err)
 							}
 						}
-					} else if !isCritical && an.currentMode == SHELTERING {
-						an.currentMode = NORMAL
-						oldStrategy := an.PManager.GetStrategy()
-						err := an.PManager.SetStrategy(&adaptive.PersistentStrategy{
+					} else if !isCritical && srn.currentMode == SHELTERING {
+						srn.currentMode = NORMAL
+						oldStrategy := srn.PManager.GetStrategy()
+						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
 							Fsync:             false,
 							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
 							CachePreserveTime: oldStrategy.CachePreserveTime,
 						})
 
 						if err != nil {
-							if an.lg != nil {
-								an.lg.Fatal(
+							if srn.lg != nil {
+								srn.lg.Fatal(
 									"failed to transform the mode of PersistentManager",
 									zap.Error(err),
 									zap.Bool("is-leader", true),
@@ -173,10 +180,10 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 					}
 				}
 
-				if err := an.PManager.Save(rd.HardState, rd.Entries); err != nil {
-					if an.lg != nil {
-						s := an.PManager.GetStrategy()
-						an.lg.Fatal(
+				if err := srn.PManager.Save(rd.HardState, rd.Entries); err != nil {
+					if srn.lg != nil {
+						s := srn.PManager.GetStrategy()
+						srn.lg.Fatal(
 							"failed to save Raft hard state and entries",
 							zap.Error(err),
 							zap.String("mode", "NORMAL -> SHELTERING"),
@@ -196,9 +203,9 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 				// TODO(similtylers): deal with snapshot
 				if !raft.IsEmptySnap(rd.Snapshot) {
 					// gofail: var raftBeforeSaveSnap struct{}
-					if err := an.storage.SaveSnap(rd.Snapshot); err != nil {
-						if an.lg != nil {
-							an.lg.Fatal("failed to save Raft snapshot", zap.Error(err))
+					if err := srn.storage.SaveSnap(rd.Snapshot); err != nil {
+						if srn.lg != nil {
+							srn.lg.Fatal("failed to save Raft snapshot", zap.Error(err))
 						} else {
 							plog.Fatalf("raft save snapshot error: %v", err)
 						}
@@ -207,20 +214,20 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 					notifyc <- struct{}{}
 
 					// gofail: var raftAfterSaveSnap struct{}
-					an.raftStorage.ApplySnapshot(rd.Snapshot)
-					if an.lg != nil {
-						an.lg.Info("applied incoming Raft snapshot", zap.Uint64("snapshot-index", rd.Snapshot.Metadata.Index))
+					srn.raftStorage.ApplySnapshot(rd.Snapshot)
+					if srn.lg != nil {
+						srn.lg.Info("applied incoming Raft snapshot", zap.Uint64("snapshot-index", rd.Snapshot.Metadata.Index))
 					} else {
 						plog.Infof("raft applied incoming snapshot at index %d", rd.Snapshot.Metadata.Index)
 					}
 					// gofail: var raftAfterApplySnap struct{}
 				}
 
-				an.raftStorage.Append(rd.Entries)
+				srn.raftStorage.Append(rd.Entries)
 
 				if !isLead {
 					// finish processing incoming messages before we signal raftdone chan
-					msgs := an.processMessages(rd.Messages)
+					msgs := srn.processMessages(rd.Messages)
 
 					// now unblocks 'applyAll' that waits on Raft log disk writes before triggering snapshots
 					notifyc <- struct{}{}
@@ -245,28 +252,28 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 						// (assume notifyc has cap of 1)
 						select {
 						case notifyc <- struct{}{}:
-						case <-an.stopped:
+						case <-srn.stopped:
 							return
 						}
 					}
 
 					// gofail: var raftBeforeFollowerSend struct{}
-					an.transport.Send(msgs)
+					srn.transport.Send(msgs)
 
-					isCritical := an.PeerMonitor.IsCritical()
+					isCritical := srn.PeerMonitor.IsCritical()
 
-					if isCritical && an.currentMode == NORMAL {
-						an.currentMode = SHELTERING
-						oldStrategy := an.PManager.GetStrategy()
-						err := an.PManager.SetStrategy(&adaptive.PersistentStrategy{
+					if isCritical && srn.currentMode == NORMAL {
+						srn.currentMode = SHELTERING
+						oldStrategy := srn.PManager.GetStrategy()
+						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
 							Fsync:             true,
 							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
 							CachePreserveTime: oldStrategy.CachePreserveTime,
 						})
 
 						if err != nil {
-							if an.lg != nil {
-								an.lg.Fatal(
+							if srn.lg != nil {
+								srn.lg.Fatal(
 									"failed to transform the mode of PersistentManager",
 									zap.Error(err),
 									zap.Bool("is-leader", false),
@@ -280,10 +287,10 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 						}
 
 						// flush all the cached
-						if err := an.PManager.Flush(); err != nil {
-							if an.lg != nil {
-								s := an.PManager.GetStrategy()
-								an.lg.Fatal(
+						if err := srn.PManager.Flush(); err != nil {
+							if srn.lg != nil {
+								s := srn.PManager.GetStrategy()
+								srn.lg.Fatal(
 									"failed to flush cached hardState and entries",
 									zap.Error(err),
 									zap.String("mode", "NORMAL -> SHELTERING"),
@@ -294,18 +301,18 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 								plog.Fatalf("flush cached hardState and entries error: %v", err)
 							}
 						}
-					} else if !isCritical && an.currentMode == SHELTERING {
-						an.currentMode = NORMAL
-						oldStrategy := an.PManager.GetStrategy()
-						err := an.PManager.SetStrategy(&adaptive.PersistentStrategy{
+					} else if !isCritical && srn.currentMode == SHELTERING {
+						srn.currentMode = NORMAL
+						oldStrategy := srn.PManager.GetStrategy()
+						err := srn.PManager.SetStrategy(&adaptive.PersistentStrategy{
 							Fsync:             false,
 							MaxLocalCacheSize: oldStrategy.MaxLocalCacheSize,
 							CachePreserveTime: oldStrategy.CachePreserveTime,
 						})
 
 						if err != nil {
-							if an.lg != nil {
-								an.lg.Fatal(
+							if srn.lg != nil {
+								srn.lg.Fatal(
 									"failed to transform the mode of PersistentManager",
 									zap.Error(err),
 									zap.Bool("is-leader", false),
@@ -323,18 +330,18 @@ func (an *AdaNode) start(rh *raftReadyHandler) {
 					notifyc <- struct{}{}
 				}
 
-				an.Advance()
-			case <-an.stopped:
+				srn.Advance()
+			case <-srn.stopped:
 				return
 			}
 		}
 	}()
 }
 
-func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
+func (srn *SaucrRaftNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 	sentAppResp := false
 	for i := len(ms) - 1; i >= 0; i-- {
-		if an.isIDRemoved(ms[i].To) {
+		if srn.isIDRemoved(ms[i].To) {
 			ms[i].To = 0
 		}
 
@@ -352,27 +359,27 @@ func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 			// So we need to redirect the msgSnap to etcd server main loop for merging in the
 			// current store snapshot and KV snapshot.
 			select {
-			case an.msgSnapC <- ms[i]:
+			case srn.msgSnapC <- ms[i]:
 			default:
 				// drop msgSnap if the inflight chan if full.
 			}
 			ms[i].To = 0
 		}
 		if ms[i].Type == raftpb.MsgHeartbeat {
-			an.PeerMonitor.Perceive(ms[i].To, false)
-			ok, exceed := an.td.Observe(ms[i].To)
+			srn.PeerMonitor.Perceive(ms[i].To, false)
+			ok, exceed := srn.td.Observe(ms[i].To)
 			if !ok {
 				// TODO: limit request rate.
-				if an.lg != nil {
-					an.lg.Warn(
+				if srn.lg != nil {
+					srn.lg.Warn(
 						"leader failed to send out heartbeat on time; took too long, leader is overloaded likely from slow disk",
 						zap.String("to", fmt.Sprintf("%x", ms[i].To)),
-						zap.Duration("heartbeat-interval", an.heartbeat),
-						zap.Duration("expected-duration", 2*an.heartbeat),
+						zap.Duration("heartbeat-interval", srn.heartbeat),
+						zap.Duration("expected-duration", 2*srn.heartbeat),
 						zap.Duration("exceeded-duration", exceed),
 					)
 				} else {
-					plog.Warningf("failed to send out heartbeat on time (exceeded the %v timeout for %v, to %x)", an.heartbeat, exceed, ms[i].To)
+					plog.Warningf("failed to send out heartbeat on time (exceeded the %v timeout for %v, to %x)", srn.heartbeat, exceed, ms[i].To)
 					plog.Warningf("server is likely overloaded")
 				}
 				heartbeatSendFailures.Inc()
@@ -382,20 +389,20 @@ func (an *AdaNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 	return ms
 }
 
-func (an *AdaNode) updatePeerMonitorFromReady(rd raft.Ready) {
+func (srn *SaucrRaftNode) updatePeerMonitorFromReady(rd raft.Ready) {
 	if rd.RaftState == raft.StateLeader || rd.RaftState == raft.StateFollower {
-		critical := an.PeerMonitor.IsCritical()
+		critical := srn.PeerMonitor.IsCritical()
 		pConfig := &adaptive.PerceptibleConfig{
 			State:    rd.RaftState,
 			Leader:   rd.SoftState.Lead,
-			Self:     an.self,
+			Self:     srn.self,
 			Critical: critical,
-			Peers:    an.peers,
+			Peers:    srn.peers,
 		}
 
-		if err := an.PeerMonitor.SetConfig(pConfig); err != nil {
-			if an.lg != nil {
-				an.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
+		if err := srn.PeerMonitor.SetConfig(pConfig); err != nil {
+			if srn.lg != nil {
+				srn.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
 			} else {
 				plog.Fatalf("PeerMonitor refreshing error: %v", err)
 			}
@@ -404,14 +411,14 @@ func (an *AdaNode) updatePeerMonitorFromReady(rd raft.Ready) {
 		pConfig := &adaptive.PerceptibleConfig{
 			State:    rd.RaftState,
 			Leader:   rd.SoftState.Lead,
-			Self:     an.self,
+			Self:     srn.self,
 			Critical: true,
-			Peers:    an.peers,
+			Peers:    srn.peers,
 		}
 
-		if err := an.PeerMonitor.SetConfig(pConfig); err != nil {
-			if an.lg != nil {
-				an.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
+		if err := srn.PeerMonitor.SetConfig(pConfig); err != nil {
+			if srn.lg != nil {
+				srn.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
 			} else {
 				plog.Fatalf("PeerMonitor refreshing error: %v", err)
 			}
@@ -420,7 +427,121 @@ func (an *AdaNode) updatePeerMonitorFromReady(rd raft.Ready) {
 
 }
 
-func NewAdaNode(r raftNode, peers []uint64) *AdaNode {
+// updatePMonitorSoft behaves similar to the description in etcd-notes-saucr-implementation.md
+//
+// This function only updates PerceptibleConfig rather than Perceptible per se.
+// To be mentioned, $3(leader) should get from rh.getLead, in consideration for atomicity
+
+func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, state raft.StateType, leader uint64) *adaptive.PerceptibleConfig {
+	if state == raft.StateLeader || state == raft.StateFollower {
+		cfg.State = state
+		cfg.Leader = leader
+	} else {
+		cfg.State = state
+		cfg.Leader = leader
+		cfg.Critical = true
+	}
+	return cfg
+}
+
+// updatePMonitorHard behaves similar to the description in etcd-notes-saucr-implementation.md
+//
+// This function only updates PerceptibleConfig rather than Perceptible per se.
+// To be mentioned, this function calls only when it is in StateFollower
+
+func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h raftpb.HardState) *adaptive.PerceptibleConfig {
+	if !raft.IsEmptyHardState(h) {
+		if msg, ok := srn.GetExactlyAndDropMsgSaucr(h.Term); ok {
+			if cfg == nil {
+				cfg = srn.PeerMonitor.GetConfig()
+			}
+			if msg.Type == raftpb.MsgSaucrNormal {
+				cfg.Critical = false
+			} else if msg.Type == raftpb.MsgSaucrSheltering {
+				cfg.Critical = true
+			}
+		}
+	} else {
+		if msg, ok := srn.GetAndDropMsgSaucr(); ok {
+			if cfg == nil {
+				cfg = srn.PeerMonitor.GetConfig()
+			}
+			if msg.Type == raftpb.MsgSaucrNormal {
+				cfg.Critical = false
+			} else if msg.Type == raftpb.MsgSaucrSheltering {
+				cfg.Critical = true
+			}
+		}
+	}
+
+	return cfg
+}
+
+func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *adaptive.PersistentStrategy {
+	if cfg != nil {
+		if cfg.Critical && srn.currentMode == NORMAL {
+			srn.currentMode = SHELTERING
+			s := srn.PManager.GetStrategy()
+			s.Fsync = true
+			return s
+		} else if !cfg.Critical && srn.currentMode == SHELTERING {
+			srn.currentMode = NORMAL
+			s := srn.PManager.GetStrategy()
+			s.Fsync = false
+			return s
+		}
+	}
+	return nil
+}
+
+// functions on recording whether receive MsgSaucrSheltering or MsgSaucrNormal
+
+func (srn *SaucrRaftNode) ReceiveMsgSaucr(message raftpb.Message) {
+	srn.msgSaucrMu.Lock()
+	defer srn.msgSaucrMu.Unlock()
+
+	if srn.msgSaucrTerm <= message.Term {
+		srn.msgSaucrEmpty = false
+		srn.msgSaucrTerm = message.Term
+		srn.msgSaucrMessage = message
+	}
+}
+
+func (srn *SaucrRaftNode) DropMsgSaucr() {
+	srn.msgSaucrMu.Lock()
+	defer srn.msgSaucrMu.Unlock()
+
+	srn.msgSaucrEmpty = true
+}
+
+func (srn *SaucrRaftNode) GetAndDropMsgSaucr() (raftpb.Message, bool) {
+	srn.msgSaucrMu.Lock()
+	defer srn.msgSaucrMu.Unlock()
+
+	if !srn.msgSaucrEmpty {
+		return srn.msgSaucrMessage, true
+	}
+
+	srn.msgSaucrEmpty = true
+
+	return raftpb.Message{}, false
+}
+
+func (srn *SaucrRaftNode) GetExactlyAndDropMsgSaucr(term uint64) (raftpb.Message, bool) {
+	srn.msgSaucrMu.Lock()
+	defer srn.msgSaucrMu.Unlock()
+
+	if !srn.msgSaucrEmpty && srn.msgSaucrTerm == term {
+		return srn.msgSaucrMessage, true
+	}
+
+	srn.msgSaucrTerm = term
+	srn.msgSaucrEmpty = true
+
+	return raftpb.Message{}, false
+}
+
+func NewSaucrRaftNode(r raftNode, peers []uint64) *SaucrRaftNode {
 	monitor, err := adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, &adaptive.PerceptibleConfig{
 		State:    raft.StateFollower,
 		Leader:   raft.None,
@@ -430,12 +551,12 @@ func NewAdaNode(r raftNode, peers []uint64) *AdaNode {
 
 	if err != nil {
 		if r.lg != nil {
-			r.lg.Fatal("AdaNode instantiation failed", zap.Error(err))
+			r.lg.Fatal("SaucrRaftNode instantiation failed", zap.Error(err))
 		}
 		return nil
 	}
 
-	return &AdaNode{
+	return &SaucrRaftNode{
 		raftNode:    r,
 		peers:       peers,
 		self:        0,
