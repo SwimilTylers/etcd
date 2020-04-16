@@ -1,6 +1,7 @@
 package etcdserver
 
 import (
+	"errors"
 	"fmt"
 	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/raft"
@@ -10,22 +11,8 @@ import (
 	"time"
 )
 
-const (
-	// NORMAL MODE means that current peer network works fine.
-	//
-	// Therefore, SaucrRaftNode should prefer performance and reduce
-	// the frequency of persistent operations.
-	NORMAL uint8 = iota
-
-	// SHELTERING MODE means that current peer network is at stake.
-	//
-	// Therefore, SaucrRaftNode should prefer reliability and insists to
-	// persist.
-	SHELTERING
-)
-
 type SaucrRaftNode struct {
-	raftNode
+	*raftNode
 
 	peers []uint64
 	self  uint64
@@ -35,20 +22,18 @@ type SaucrRaftNode struct {
 	// whether to switch between fast-but-not-reliable mode and
 	// slow-but-reliable mode.
 	//
-	// To be more specific:
-	//   1. PeerMonitor perceives connectivity from the result of heartbeat
-	//   2. When SaucrMonitor.IsCritical is true, running in slow mode
-	//   3. When SoftState changes, PeerMonitor has to reset
+	// To be more specific, check etcd-notes-saucr-implementations.md
 	PeerMonitor adaptive.Perceptible
 
 	// currentMode: NORMAL or SHELTERING
-	currentMode uint8
+	currentMode SaucrMode
 
 	// PManager is a wrapper Storage with a memory cache.
 	// It can switch between on-cache mode and must-persist mode according to its fsync flag.
 	PManager adaptive.PersistentManager
 
 	// MsgSaucr related fields
+
 	msgSaucrMu      sync.Mutex
 	msgSaucrEmpty   bool
 	msgSaucrTerm    uint64
@@ -374,49 +359,10 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PerceptibleConfig, 
 	}
 }
 
-func (srn *SaucrRaftNode) updatePeerMonitorFromReady(rd raft.Ready) {
-	if rd.RaftState == raft.StateLeader || rd.RaftState == raft.StateFollower {
-		critical := srn.PeerMonitor.IsCritical()
-		pConfig := &adaptive.PerceptibleConfig{
-			State:    rd.RaftState,
-			Leader:   rd.SoftState.Lead,
-			Self:     srn.self,
-			Critical: critical,
-			Peers:    srn.peers,
-		}
-
-		if err := srn.PeerMonitor.SetConfig(pConfig); err != nil {
-			if srn.lg != nil {
-				srn.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
-			} else {
-				plog.Fatalf("PeerMonitor refreshing error: %v", err)
-			}
-		}
-	} else {
-		pConfig := &adaptive.PerceptibleConfig{
-			State:    rd.RaftState,
-			Leader:   rd.SoftState.Lead,
-			Self:     srn.self,
-			Critical: true,
-			Peers:    srn.peers,
-		}
-
-		if err := srn.PeerMonitor.SetConfig(pConfig); err != nil {
-			if srn.lg != nil {
-				srn.lg.Fatal("failed to refresh PeerMonitor", zap.Error(err))
-			} else {
-				plog.Fatalf("PeerMonitor refreshing error: %v", err)
-			}
-		}
-	}
-
-}
-
 // updatePMonitorSoft behaves similar to the description in etcd-notes-saucr-implementation.md
 //
 // This function only updates PerceptibleConfig rather than Perceptible per se.
 // To be mentioned, $3(leader) should get from rh.getLead, in consideration for atomicity
-
 func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, state raft.StateType, leader uint64) *adaptive.PerceptibleConfig {
 	if state == raft.StateLeader || state == raft.StateFollower {
 		cfg.State = state
@@ -433,7 +379,6 @@ func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, st
 //
 // This function only updates PerceptibleConfig rather than Perceptible per se.
 // To be mentioned, this function calls only when it is in StateFollower
-
 func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h raftpb.HardState) *adaptive.PerceptibleConfig {
 	if !raft.IsEmptyHardState(h) {
 		srn.term = h.Term
@@ -463,6 +408,7 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 	return cfg
 }
 
+// updatePManagerMode behaves similar to the description in etcd-notes-saucr-implementation.md
 func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *adaptive.PersistentStrategy {
 	if cfg != nil {
 		if cfg.Critical && srn.currentMode == NORMAL {
@@ -527,27 +473,60 @@ func (srn *SaucrRaftNode) GetExactlyAndDropMsgSaucr(term uint64) (raftpb.Message
 	return raftpb.Message{}, false
 }
 
-func NewSaucrRaftNode(r raftNode, peers []uint64) *SaucrRaftNode {
-	monitor, err := adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, &adaptive.PerceptibleConfig{
-		State:    raft.StateFollower,
-		Leader:   raft.None,
-		Critical: false,
-		Peers:    peers,
-	})
-
-	if err != nil {
+func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pManagerStg *adaptive.PersistentStrategy) *SaucrRaftNode {
+	if pManagerStg == nil || pMonitorCfg == nil {
 		if r.lg != nil {
-			r.lg.Fatal("SaucrRaftNode instantiation failed", zap.Error(err))
+			r.lg.Fatal("SaucrRaftNode instantiation failed",
+				zap.Error(errors.New("insufficient cfg")),
+			)
+		} else {
+			plog.Fatal("SaucrRaftNode instantiation failed: insufficient cfg")
 		}
 		return nil
 	}
 
+	monitor, err := adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, pMonitorCfg)
+
+	if err != nil {
+		if r.lg != nil {
+			r.lg.Fatal("SaucrRaftNode instantiation failed",
+				zap.Error(err),
+				zap.String("pMonitor-config", fmt.Sprintf("%+v", pMonitorCfg)),
+				zap.Bool("fsync", pManagerStg.Fsync),
+			)
+		} else {
+			plog.Fatalf("SaucrRaftNode instantiation failed: %v", err)
+		}
+		return nil
+	} else if monitor.IsCritical() != pManagerStg.Fsync {
+		if r.lg != nil {
+			r.lg.Fatal("SaucrRaftNode instantiation failed",
+				zap.Error(errors.New("inconsistent cfg")),
+				zap.Bool("critical", monitor.IsCritical()),
+				zap.Bool("fsync", pManagerStg.Fsync),
+			)
+		} else {
+			plog.Fatal("SaucrRaftNode instantiation failed: inconsistent cfg")
+		}
+		return nil
+	}
+
+	pManager := NewLocalCachedDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: pManagerStg})
+
+	var mode SaucrMode
+
+	if pManagerStg.Fsync {
+		mode = SHELTERING
+	} else {
+		mode = NORMAL
+	}
+
 	return &SaucrRaftNode{
 		raftNode:    r,
-		peers:       peers,
-		self:        0,
+		peers:       pMonitorCfg.Peers,
+		self:        pMonitorCfg.Self,
 		PeerMonitor: monitor,
-		currentMode: NORMAL,
-		PManager:    NewLocalCachedDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: adaptive.DefaultStrategy}),
+		currentMode: mode,
+		PManager:    pManager,
 	}
 }

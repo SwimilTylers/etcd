@@ -4,6 +4,7 @@ import (
 	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
+	"go.uber.org/zap"
 	"math/rand"
 	"sync"
 	"testing"
@@ -16,7 +17,7 @@ const (
 	closing
 )
 
-type dummyDiskIssue struct {
+type LeakyStorageAction struct {
 	issue uint8
 
 	st   raftpb.HardState
@@ -25,61 +26,61 @@ type dummyDiskIssue struct {
 	snap raftpb.Snapshot
 }
 
-type dummyDisk struct {
+type LeakyStorage struct {
 	mu      sync.Mutex
-	devNull chan *dummyDiskIssue
+	devNull chan *LeakyStorageAction
 	used    bool
 }
 
-func (dd *dummyDisk) Save(st raftpb.HardState, ents []raftpb.Entry) error {
-	dd.mu.Lock()
-	defer dd.mu.Unlock()
+func (ls *LeakyStorage) Save(st raftpb.HardState, ents []raftpb.Entry) error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
 
-	dd.devNull <- &dummyDiskIssue{
+	ls.devNull <- &LeakyStorageAction{
 		issue: saving,
 		st:    st,
 		ents:  ents,
 	}
 
-	dd.used = true
+	ls.used = true
 
 	return nil
 }
 
-func (dd *dummyDisk) SaveSnap(snap raftpb.Snapshot) error {
-	dd.mu.Lock()
-	defer dd.mu.Unlock()
+func (ls *LeakyStorage) SaveSnap(snap raftpb.Snapshot) error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
 
-	dd.devNull <- &dummyDiskIssue{
+	ls.devNull <- &LeakyStorageAction{
 		issue: snapping,
 		snap:  snap,
 	}
 
-	dd.used = true
+	ls.used = true
 
 	return nil
 }
 
-func (dd *dummyDisk) Close() error {
-	dd.mu.Lock()
-	defer dd.mu.Unlock()
+func (ls *LeakyStorage) Close() error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
 
-	dd.devNull <- &dummyDiskIssue{
+	ls.devNull <- &LeakyStorageAction{
 		issue: closing,
 	}
 
-	dd.used = true
-	close(dd.devNull)
+	ls.used = true
+	close(ls.devNull)
 
 	return nil
 }
 
-func (dd *dummyDisk) testAndReset() bool {
-	dd.mu.Lock()
-	defer dd.mu.Unlock()
+func (ls *LeakyStorage) testAndReset() bool {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
 
-	ret := dd.used
-	dd.used = false
+	ret := ls.used
+	ls.used = false
 
 	return ret
 }
@@ -87,7 +88,7 @@ func (dd *dummyDisk) testAndReset() bool {
 func TestFsync(t *testing.T) {
 	strategy, _, disk := GenerateStorage(true, 500, 50, true)
 
-	dd := disk.disk.(*dummyDisk)
+	dd := disk.disk.(*LeakyStorage)
 
 	if err := disk.Save(GenerateEntries()); err != nil {
 		t.Fatal("error occurs when saving")
@@ -148,7 +149,7 @@ func TestFsync(t *testing.T) {
 func TestCache(t *testing.T) {
 	strategy, _, disk := GenerateStorage(false, 500, 200, true)
 
-	dd := disk.disk.(*dummyDisk)
+	dd := disk.disk.(*LeakyStorage)
 
 	finished := make(chan int)
 
@@ -259,7 +260,7 @@ func TestCache(t *testing.T) {
 	}
 }
 
-func GenerateStorage(fsync bool, waitMillis int, cacheSize int, buffered bool) (*adaptive.PersistentStrategy, chan *dummyDiskIssue, *LocalCachedDisk) {
+func GenerateStorage(fsync bool, waitMillis int, cacheSize int, buffered bool) (*adaptive.PersistentStrategy, chan *LeakyStorageAction, *LocalCachedDisk) {
 	var strat = &adaptive.PersistentStrategy{
 		Fsync:             fsync,
 		MaxLocalCacheSize: cacheSize,
@@ -271,15 +272,15 @@ func GenerateStorage(fsync bool, waitMillis int, cacheSize int, buffered bool) (
 		Remotes:  nil,
 	}
 
-	var saved chan *dummyDiskIssue
+	var saved chan *LeakyStorageAction
 
 	if buffered {
-		saved = make(chan *dummyDiskIssue, 1000)
+		saved = make(chan *LeakyStorageAction, 1000)
 	} else {
-		saved = make(chan *dummyDiskIssue)
+		saved = make(chan *LeakyStorageAction)
 	}
 
-	return strat, saved, NewLocalCachedDisk(nil, &dummyDisk{sync.Mutex{}, saved, false}, config)
+	return strat, saved, NewLocalCachedDisk(zap.NewExample(), &LeakyStorage{sync.Mutex{}, saved, false}, config)
 }
 
 func GenerateEntries() (raftpb.HardState, []raftpb.Entry) {
