@@ -553,6 +553,8 @@ func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
 		return nil, fmt.Errorf("cannot access member directory: %v", terr)
 	}
 
+	// assembling saucr-related configurations
+
 	peerIds := cl.MemberIDs()
 	peers := make([]uint64, len(peerIds))
 	for i := 0; i < len(peers); i++ {

@@ -1,6 +1,26 @@
 package etcdserver
 
+import "strings"
+
 type SaucrMode uint8
+
+func (m SaucrMode) String() string {
+	if m == NORMAL {
+		return "NORMAL"
+	} else if m == SHELTERING {
+		return "SHELTERING"
+	} else {
+		return "UNKNOWN"
+	}
+}
+
+func GetModeFromString(s string) SaucrMode {
+	if strings.ToUpper(s) == "NORMAL" {
+		return NORMAL
+	} else {
+		return SHELTERING
+	}
+}
 
 const (
 	// NORMAL MODE means that current peer network works fine.
@@ -22,6 +42,22 @@ func (m SaucrMode) IsCritical() bool {
 
 func (m SaucrMode) IsFsync() bool {
 	return m == SHELTERING
+}
+
+func (m SaucrMode) IsConflictFromCritical(critical bool) bool {
+	if critical {
+		return m != SHELTERING
+	} else {
+		return m != NORMAL
+	}
+}
+
+func (m SaucrMode) IsConflictFromFsync(fsync bool) bool {
+	if fsync {
+		return m != SHELTERING
+	} else {
+		return m != NORMAL
+	}
 }
 
 func GetModeFromCritical(critical bool) SaucrMode {

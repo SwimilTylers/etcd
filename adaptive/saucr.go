@@ -211,7 +211,7 @@ func (sm *SaucrMonitor) countUnconnectedEscapeSelf() int {
 
 func (sm *SaucrMonitor) evaluate() bool {
 	if sm.mustCritical {
-		// if manually set mustCritical, it should blindly follows
+		// if manually set mustCritical, it should blindly follow
 		return true
 	} else {
 		// otherwise, monitor should decide on whether to be critical
