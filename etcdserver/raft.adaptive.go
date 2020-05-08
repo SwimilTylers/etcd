@@ -410,13 +410,17 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 
 // updatePManagerMode behaves similar to the description in etcd-notes-saucr-implementation.md
 func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *adaptive.PersistentStrategy {
+	var critical bool
 	if cfg != nil {
-		if srn.currentMode.IsConflictFromCritical(cfg.Critical) {
-			srn.currentMode = GetModeFromCritical(cfg.Critical)
-			s := srn.PManager.GetStrategy()
-			s.Fsync = srn.currentMode.IsFsync()
-			return s
-		}
+		critical = cfg.Critical
+	} else {
+		critical = srn.PeerMonitor.IsCritical()
+	}
+	if srn.currentMode.IsConflictFromCritical(critical) {
+		srn.currentMode = GetModeFromCritical(critical)
+		s := srn.PManager.GetStrategy()
+		s.Fsync = srn.currentMode.IsFsync()
+		return s
 	}
 	return nil
 }

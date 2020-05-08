@@ -110,6 +110,10 @@ func (tsk *testSaucrKit) init() {
 }
 
 func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
+
+}
+
+func TestSaucrRaftNodeStateChange(t *testing.T) {
 	var tests = make(map[string]func(t *testing.T))
 
 	tests["NLeader -> NLeader"] = func(t *testing.T) {
@@ -200,7 +204,95 @@ func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 	}
 
 	tests["ULeader -> NLeader"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			1, 2, 0,
+			GetQAlloc("monopoly"),
+			GetMAlloc("uniform", SHELTERING),
+		)
 
+		leader := newTestSaucrKit(sLeaders[0])
+		leader.init()
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			leader.srn.Stop()
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		// sending hbs
+
+		hb := make([]raftpb.Message, len(followers))
+
+		for i, follower := range followers {
+			hb[i] = raftpb.Message{
+				Type: raftpb.MsgHeartbeat,
+				To:   follower.id,
+				From: leader.id,
+			}
+		}
+
+		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
+
+		//ap := <-leader.srn.applyc
+		<-leader.srn.applyc
+
+		if len(leader.bareDisk.Action()) == 0 {
+			t.Error("leader has not persisted entries onto disk")
+		}
+
+		if leader.pManager.UnPersisted() {
+			t.Error("cached entries uncleared")
+		}
+
+		// <-ap.notifyc
+
+		// receiving hb responses
+
+		hbrp := make([]raftpb.Message, len(hb))
+
+		for i := 0; i < 3; i++ {
+			for i := 0; i < len(hb); i++ {
+				hbrp[i] = raftpb.Message{
+					Type: raftpb.MsgHeartbeatResp,
+					To:   hb[i].From,
+					From: hb[i].To,
+				}
+
+				leader.srv.Process(nil, hbrp[i])
+
+				if !leader.pMonitor.IsCritical() {
+					t.Error("leader should stay sheltering")
+				}
+			}
+			leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
+			<-leader.srn.applyc
+		}
+
+		for i := 0; i < len(hb); i++ {
+			hbrp[i] = raftpb.Message{
+				Type: raftpb.MsgHeartbeatResp,
+				To:   hb[i].From,
+				From: hb[i].To,
+			}
+
+			leader.srv.Process(nil, hbrp[i])
+		}
+
+		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
+		ap := <-leader.srn.applyc
+		<-ap.notifyc
+
+		if leader.pMonitor.IsCritical() || leader.pManager.fsync || leader.srn.currentMode == SHELTERING {
+			t.Errorf("leader should stay normal, [%v,%v,%v]",
+				leader.pMonitor.IsCritical(), leader.pManager.fsync, leader.srn.currentMode)
+		}
 	}
 
 	tests["NLeader -> ULeader"] = func(t *testing.T) {
@@ -218,10 +310,6 @@ func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 	for k, v := range tests {
 		t.Run(k, v)
 	}
-}
-
-func TestSaucrRaftNodeStateChange(t *testing.T) {
-
 }
 
 func TestSaucrRaftNodeModeSwitch(t *testing.T) {
