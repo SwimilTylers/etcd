@@ -38,6 +38,13 @@ type LocalCachedDisk struct {
 	cachePreserveReminder <-chan time.Time
 }
 
+func (lcd *LocalCachedDisk) UnPersisted() bool {
+	lcd.mu.Lock()
+	defer lcd.mu.Unlock()
+
+	return !raft.IsEmptyHardState(lcd.cachedHardState) || len(lcd.cachedEntries) != 0
+}
+
 func (lcd *LocalCachedDisk) Flush() error {
 	lcd.mu.Lock()
 	defer lcd.mu.Unlock()
@@ -60,7 +67,18 @@ func (lcd *LocalCachedDisk) flushInternal(callerName string, otherSourceHS raftp
 
 	// check if a dummy flush
 	if len(entries) == 0 {
-		return nil
+		err := lcd.disk.Save(hs, make([]raftpb.Entry, 0))
+		if lcd.logger != nil {
+			if err != nil {
+				lcd.logger.Error("error occurs when persist cached HardState",
+					zap.String("op", callerName),
+					zap.Error(err),
+				)
+			} else {
+				lcd.logger.Info("cached HardState persisted", zap.String("op", callerName))
+			}
+		}
+		return err
 	}
 
 	err := lcd.disk.Save(hs, entries)
@@ -70,11 +88,15 @@ func (lcd *LocalCachedDisk) flushInternal(callerName string, otherSourceHS raftp
 	lcd.cachedEntries = lcd.cachedEntries[:0]
 	lcd.cachedHardState = emptyState
 
-	if lcd.logger != nil && err != nil {
-		lcd.logger.Error("error occurs when persist cached entries",
-			zap.String("op", callerName),
-			zap.Error(err),
-		)
+	if lcd.logger != nil {
+		if err != nil {
+			lcd.logger.Error("error occurs when persist cached Entries and HardState",
+				zap.String("op", callerName),
+				zap.Error(err),
+			)
+		} else {
+			lcd.logger.Info("cached Entries and HardState persisted", zap.String("op", callerName))
+		}
 	}
 
 	return err
@@ -204,45 +226,24 @@ func (lcd *LocalCachedDisk) SaveSnap(snap raftpb.Snapshot) error {
 	lcd.mu.Lock()
 	defer lcd.mu.Unlock()
 
-	select {
-	case <-lcd.cachePreserveReminder:
-
-		lcd.cachePreserveReminder = nil
-
-		err := lcd.disk.Save(lcd.cachedHardState, lcd.cachedEntries)
-
-		// clear cache
-		lcd.cachedEntries = lcd.cachedEntries[:0]
-		lcd.cachedHardState = emptyState
-
-		if lcd.logger != nil && err != nil {
-			lcd.logger.Error("error occurs when persist cached entries",
-				zap.String("op", "SaveSnap"),
-				zap.Error(err),
-			)
+	if raft.IsEmptySnap(snap) {
+		select {
+		case <-lcd.cachePreserveReminder:
+			return lcd.flushInternal("SaveSnap", emptyState, nil)
+		default:
+			return nil
 		}
-	default:
+	} else {
+		_ = lcd.flushInternal("SaveSnap", emptyState, nil)
+		return lcd.disk.SaveSnap(snap)
 	}
-
-	return lcd.disk.SaveSnap(snap)
 }
 
 func (lcd *LocalCachedDisk) Close() error {
 	lcd.mu.Lock()
 	defer lcd.mu.Unlock()
 
-	if len(lcd.cachedEntries) != 0 {
-		if err := lcd.disk.Save(lcd.cachedHardState, lcd.cachedEntries); lcd.logger != nil && err != nil {
-			lcd.logger.Error("error occurs when persist cached entries",
-				zap.String("op", "Close"),
-				zap.Error(err),
-			)
-		}
-
-		lcd.cachedHardState = emptyState
-		lcd.cachedEntries = lcd.cachedEntries[:0]
-		lcd.cachePreserveReminder = nil
-	}
+	_ = lcd.flushInternal("Close", emptyState, nil)
 
 	return lcd.disk.Close()
 }

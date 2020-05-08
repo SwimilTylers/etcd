@@ -101,6 +101,14 @@ func newTestSaucrKit(srv *EtcdSaucrServer) *testSaucrKit {
 	return kit
 }
 
+func (tsk *testSaucrKit) init() {
+	role := tsk.pMonitor.GetConfig().State
+
+	tsk.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: tsk.leader, RaftState: role}}
+	tsk.srn.start(tsk.rh)
+	<-tsk.srn.applyc
+}
+
 func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 	var tests = make(map[string]func(t *testing.T))
 
@@ -112,16 +120,12 @@ func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 		)
 
 		leader := newTestSaucrKit(sLeaders[0])
-		leader.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: leader.id, RaftState: raft.StateLeader}}
-		leader.srn.start(leader.rh)
-		<-leader.srn.applyc
+		leader.init()
 
 		followers := make([]*testSaucrKit, len(sFollowers))
 		for i := 0; i < len(sFollowers); i++ {
 			followers[i] = newTestSaucrKit(sFollowers[i])
-			followers[i].raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: leader.id, RaftState: raft.StateFollower}}
-			followers[i].srn.start(followers[i].rh)
-			<-followers[i].srn.applyc
+			followers[i].init()
 		}
 
 		defer func() {
@@ -161,7 +165,7 @@ func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 			t.Error("leader has persisted entries onto disk")
 		}
 
-		if len(leader.pManager.cachedEntries) == 0 {
+		if !leader.pManager.UnPersisted() {
 			t.Error("cached entries lost")
 		}
 
@@ -190,7 +194,7 @@ func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 			t.Error("leader has persisted entries onto disk")
 		}
 
-		if len(leader.pManager.cachedEntries) == 0 {
+		if !leader.pManager.UnPersisted() {
 			t.Error("cached entries lost")
 		}
 	}

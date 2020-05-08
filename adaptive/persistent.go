@@ -7,8 +7,8 @@ import (
 
 var DefaultStrategy = &PersistentStrategy{
 	Fsync:             false,
-	MaxLocalCacheSize: 50,
-	CachePreserveTime: time.Second,
+	MaxLocalCacheSize: 500,
+	CachePreserveTime: 10 * time.Second,
 }
 
 type PersistentConfig struct {
@@ -31,6 +31,7 @@ type PersistentManager interface {
 	SaveSnap(snap raftpb.Snapshot) error
 	Close() error
 
+	UnPersisted() bool
 	Flush() error
 
 	GetConfig() *PersistentConfig
