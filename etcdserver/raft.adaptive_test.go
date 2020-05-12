@@ -1,6 +1,7 @@
 package etcdserver
 
 import (
+	"fmt"
 	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/etcdserver/api/membership"
 	"go.etcd.io/etcd/etcdserver/api/snap"
@@ -21,6 +22,10 @@ import (
 
 type mockingIO struct {
 	*testutil.RecorderBuffered
+}
+
+func (m *mockingIO) Clear() {
+	m.RecorderBuffered = &testutil.RecorderBuffered{}
 }
 
 func (m *mockingIO) Send(msgs []raftpb.Message) {
@@ -109,11 +114,47 @@ func (tsk *testSaucrKit) init() {
 	<-tsk.srn.applyc
 }
 
+func (tsk *testSaucrKit) testMode(expected SaucrMode, orElse string) (string, bool) {
+	c := tsk.pMonitor.IsCritical()
+	f := tsk.pManager.fsync
+	m := tsk.srn.currentMode
+
+	if c != expected.IsCritical() || f != expected.IsFsync() || m != expected {
+		return fmt.Sprintf("mode test failed (expected=%v) %s [%v,%v,%v]", expected, orElse, c, f, m), false
+	} else {
+		return "", true
+	}
+}
+
+func (tsk *testSaucrKit) testPersist(expected bool, orElse string) (string, bool) {
+	if expected {
+		if len(tsk.bareDisk.Action()) == 0 || tsk.pManager.UnPersisted() {
+			return fmt.Sprintf("persist test failed (expect=persisted) %s", orElse), false
+		}
+	} else {
+		if len(tsk.bareDisk.Action()) != 0 || !tsk.pManager.UnPersisted() {
+			return fmt.Sprintf("persist test failed (expect=not_persisted) %s", orElse), false
+		}
+	}
+
+	return "", true
+}
+
+func (tsk *testSaucrKit) clearRecords(disk, network bool) {
+	if disk {
+		tsk.bareDisk.(*mockingIO).Clear()
+	}
+
+	if network {
+		tsk.bareNetwork.(*mockingIO).Clear()
+	}
+}
+
 func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 
 }
 
-func TestSaucrRaftNodeStateChange(t *testing.T) {
+func TestSaucrLeaderStepOne(t *testing.T) {
 	var tests = make(map[string]func(t *testing.T))
 
 	tests["NLeader -> NLeader"] = func(t *testing.T) {
@@ -152,25 +193,13 @@ func TestSaucrRaftNodeStateChange(t *testing.T) {
 		}
 
 		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
-
-		if leader.pMonitor.IsCritical() {
-			t.Error("leader should stay normal before sending a round of hbs")
-		}
-
-		//ap := <-leader.srn.applyc
 		<-leader.srn.applyc
 
-		if leader.pMonitor.IsCritical() || leader.pManager.fsync || leader.srn.currentMode == SHELTERING {
-			t.Errorf("leader should stay normal after sending a round of hbs, even not yet receiving any response, [%v,%v,%v]",
-				leader.pMonitor.IsCritical(), leader.pManager.fsync, leader.srn.currentMode)
+		if s, ok := leader.testMode(NORMAL, "init hb"); !ok {
+			t.Error(s)
 		}
-
-		if len(leader.bareDisk.Action()) != 0 {
-			t.Error("leader has persisted entries onto disk")
-		}
-
-		if !leader.pManager.UnPersisted() {
-			t.Error("cached entries lost")
+		if s, ok := leader.testPersist(false, "init hb"); !ok {
+			t.Error(s)
 		}
 
 		// <-ap.notifyc
@@ -187,19 +216,12 @@ func TestSaucrRaftNodeStateChange(t *testing.T) {
 			}
 
 			leader.srv.Process(nil, hbrp[i])
-
-			if leader.pMonitor.IsCritical() || leader.pManager.fsync || leader.srn.currentMode == SHELTERING {
-				t.Errorf("leader should stay normal when receiving any response, [%v,%v,%v]",
-					leader.pMonitor.IsCritical(), leader.pManager.fsync, leader.srn.currentMode)
+			if s, ok := leader.testMode(NORMAL, "recv hb"); !ok {
+				t.Error(s)
 			}
-		}
-
-		if len(leader.bareDisk.Action()) != 0 {
-			t.Error("leader has persisted entries onto disk")
-		}
-
-		if !leader.pManager.UnPersisted() {
-			t.Error("cached entries lost")
+			if s, ok := leader.testPersist(false, "recv hb"); !ok {
+				t.Error(s)
+			}
 		}
 	}
 
@@ -243,12 +265,8 @@ func TestSaucrRaftNodeStateChange(t *testing.T) {
 		//ap := <-leader.srn.applyc
 		<-leader.srn.applyc
 
-		if len(leader.bareDisk.Action()) == 0 {
-			t.Error("leader has not persisted entries onto disk")
-		}
-
-		if leader.pManager.UnPersisted() {
-			t.Error("cached entries uncleared")
+		if s, ok := leader.testPersist(true, "init"); !ok {
+			t.Error(s)
 		}
 
 		// <-ap.notifyc
@@ -267,44 +285,255 @@ func TestSaucrRaftNodeStateChange(t *testing.T) {
 
 				leader.srv.Process(nil, hbrp[i])
 
-				if !leader.pMonitor.IsCritical() {
-					t.Error("leader should stay sheltering")
+				if s, ok := leader.testMode(SHELTERING, "recv hb"); !ok {
+					t.Error(s)
 				}
 			}
 			leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
 			<-leader.srn.applyc
 		}
 
+		term := rand.Uint64()
+
 		for i := 0; i < len(hb); i++ {
 			hbrp[i] = raftpb.Message{
 				Type: raftpb.MsgHeartbeatResp,
 				To:   hb[i].From,
 				From: hb[i].To,
+				Term: term,
 			}
 
 			leader.srv.Process(nil, hbrp[i])
 		}
 
-		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
+		leader.clearRecords(false, true)
+
+		for i, follower := range followers {
+			hb[i] = raftpb.Message{
+				Type: raftpb.MsgHeartbeat,
+				To:   follower.id,
+				From: leader.id,
+				Term: term,
+			}
+		}
+
+		leader.raft.readyc <- raft.Ready{HardState: raftpb.HardState{Term: term}, Entries: make([]raftpb.Entry, 5), Messages: hb}
 		ap := <-leader.srn.applyc
 		<-ap.notifyc
 
-		if leader.pMonitor.IsCritical() || leader.pManager.fsync || leader.srn.currentMode == SHELTERING {
-			t.Errorf("leader should stay normal, [%v,%v,%v]",
-				leader.pMonitor.IsCritical(), leader.pManager.fsync, leader.srn.currentMode)
+		time.After(300 * time.Millisecond)
+
+		if s, ok := leader.testMode(NORMAL, "send hb again"); !ok {
+			t.Error(s)
+		}
+
+		actions := leader.bareNetwork.Action()
+
+		if len(actions) != len(hb)+len(followers) {
+			t.Error("leader should broadcast its mode switch")
+		}
+
+		var count int
+
+		for _, action := range actions {
+			if action.Name == "Send" {
+				msg := action.Params[0].(raftpb.Message)
+				if msg.Term != term {
+					t.Error("term is not update")
+				}
+				if msg.Type == raftpb.MsgSaucrNormal {
+					count++
+				}
+			}
+		}
+
+		if count != len(followers) {
+			t.Error("leader should broadcast message MsgSaucrNormal")
 		}
 	}
 
 	tests["NLeader -> ULeader"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			1, 2, 0,
+			GetQAlloc("monopoly"),
+			GetMAlloc("uniform", NORMAL),
+		)
 
+		leader := newTestSaucrKit(sLeaders[0])
+		leader.init()
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			leader.srn.Stop()
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		// sending hbs
+
+		hb := make([]raftpb.Message, len(followers))
+
+		for i, follower := range followers {
+			hb[i] = raftpb.Message{
+				Type: raftpb.MsgHeartbeat,
+				To:   follower.id,
+				From: leader.id,
+			}
+		}
+
+		for i := 0; i < 2; i++ {
+			leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
+			<-leader.srn.applyc
+		}
+
+		if s, ok := leader.testMode(NORMAL, "before transformation"); !ok {
+			t.Error(s)
+		}
+
+		if s, ok := leader.testPersist(false, "before transformation"); !ok {
+			t.Error(s)
+		}
+
+		term := rand.Uint64()
+
+		for i, follower := range followers {
+			hb[i] = raftpb.Message{
+				Type: raftpb.MsgHeartbeat,
+				To:   follower.id,
+				From: leader.id,
+				Term: term,
+			}
+		}
+
+		leader.clearRecords(false, true)
+
+		leader.raft.readyc <- raft.Ready{HardState: raftpb.HardState{Term: term}, Entries: make([]raftpb.Entry, 5), Messages: hb}
+		ap := <-leader.srn.applyc
+		<-ap.notifyc
+
+		time.After(300 * time.Millisecond)
+
+		if s, ok := leader.testMode(SHELTERING, "after transformation"); !ok {
+			t.Error(s)
+		}
+
+		if s, ok := leader.testPersist(true, "after transformation"); !ok {
+			t.Error(s)
+		}
+
+		actions := leader.bareNetwork.Action()
+
+		if len(actions) != len(hb)+len(followers) {
+			t.Error("leader should broadcast the mode change")
+		}
+
+		var count int
+
+		for _, action := range actions {
+			if action.Name == "Send" {
+				msg := action.Params[0].(raftpb.Message)
+				if msg.Term != term {
+					t.Error("term is not update")
+				}
+				if msg.Type == raftpb.MsgSaucrSheltering {
+					count++
+				}
+			}
+		}
+
+		if count != len(followers) {
+			t.Error("leader should broadcast message MsgSaucrSheltering")
+		}
 	}
 
-	tests["NFollower -> UFollower"] = func(t *testing.T) {
+	tests["ULeader -> ULeader"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			1, 2, 0,
+			GetQAlloc("monopoly"),
+			GetMAlloc("uniform", SHELTERING),
+		)
 
+		leader := newTestSaucrKit(sLeaders[0])
+		leader.init()
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			leader.srn.Stop()
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		// sending hbs
+
+		hb := make([]raftpb.Message, len(followers))
+
+		for i, follower := range followers {
+			hb[i] = raftpb.Message{
+				Type: raftpb.MsgHeartbeat,
+				To:   follower.id,
+				From: leader.id,
+			}
+		}
+
+		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
+		<-leader.srn.applyc
+
+		if s, ok := leader.testMode(SHELTERING, "init hb"); !ok {
+			t.Error(s)
+		}
+		if s, ok := leader.testPersist(true, "init hb"); !ok {
+			t.Error(s)
+		}
 	}
 
-	tests["UFollower -> NFollower"] = func(t *testing.T) {
+	tests["Leader -> Follower"] = func(t *testing.T) {
+		sl, _, _ := GenerateDebugSaucrServers(
+			2, 0, 3,
+			GetQAlloc("leaderless"),
+			GetMAlloc("bi-partitioned"),
+		)
 
+		nl := newTestSaucrKit(sl[0])
+		nl.init()
+
+		ul := newTestSaucrKit(sl[1])
+		ul.init()
+
+		l := nl.srn.peers[2]
+
+		nl.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: l, RaftState: raft.StateFollower}}
+		ul.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: l, RaftState: raft.StateFollower}}
+
+		<-nl.srn.applyc
+		<-ul.srn.applyc
+
+		if nl.pMonitor.GetConfig().Leader != l || ul.pMonitor.GetConfig().Leader != l {
+			t.Error("leader has not update")
+		}
+
+		if nl.pMonitor.GetConfig().State != raft.StateFollower || ul.pMonitor.GetConfig().State != raft.StateFollower {
+			t.Error("role has not update")
+		}
+
+		if s, ok := nl.testMode(NORMAL, ""); !ok {
+			t.Error(s)
+		}
+
+		if s, ok := ul.testMode(SHELTERING, ""); !ok {
+			t.Error(s)
+		}
 	}
 
 	for k, v := range tests {
@@ -557,6 +786,18 @@ func GetMAlloc(mType string, params ...interface{}) func(int, raft.StateType) Sa
 		return func(i int, stateType raft.StateType) SaucrMode {
 			if stateType == raft.StateLeader || stateType == raft.StateFollower {
 				return mode
+			} else {
+				return SHELTERING
+			}
+		}
+	case "bi-partitioned":
+		return func(i int, stateType raft.StateType) SaucrMode {
+			if stateType == raft.StateLeader || stateType == raft.StateFollower {
+				if i%2 == 0 {
+					return NORMAL
+				} else {
+					return SHELTERING
+				}
 			} else {
 				return SHELTERING
 			}

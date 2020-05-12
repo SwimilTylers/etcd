@@ -88,11 +88,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 
 				// update PMonitor with HardState
 				// Read etcd-notes-saucr-implementation.md for more information
-				if isFollower {
-					pMonitorCfg = srn.updatePMonitorHard(pMonitorCfg, rd.HardState)
-				} else {
-					srn.DropMsgSaucr()
-				}
+				pMonitorCfg = srn.updatePMonitorHard(pMonitorCfg, rd.HardState, isFollower)
 
 				// apply pMonitor's cfg changes
 
@@ -141,22 +137,17 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 					return
 				}
 
-				// update srn and PManager's mode
-				// If srn does not change its mode yet, PManager will not either.
-				pManagerStg = srn.updatePManagerMode(pMonitorCfg)
-
 				// the leader can write to its disk in parallel with replicating to the followers and them
 				// writing to their disks.
 				// For more details, check raft thesis 10.2.1
 				if isLead {
 					// gofail: var raftBeforeLeaderSend struct{}
 					srn.transport.Send(srn.processMessages(rd.Messages))
-
-					// broadcast
-					if pMonitorCfg != nil {
-						srn.transport.Send(srn.broadcastCurrentMode(pMonitorCfg, srn.term))
-					}
 				}
+
+				// update srn and PManager's mode
+				// check if currentMode is conflicted with pMonitor (which means pMonitor has updated implicitly or otherwise)
+				pManagerStg = srn.updatePManagerMode(pMonitorCfg)
 
 				// apply pManager's stg changes
 				// Meanwhile, if switch to fsync, it is necessary to flush all buffered entries
@@ -173,7 +164,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 						} else {
 							plog.Fatalf("failed to transform the mode of PManager: %v", err)
 						}
-
+						// flush all buffered messages and hardState
 						if pManagerStg.Fsync {
 							if err := srn.PManager.Flush(); err != nil {
 								if srn.lg != nil {
@@ -270,6 +261,8 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 					// gofail: var raftBeforeFollowerSend struct{}
 					srn.transport.Send(msgs)
 				} else {
+					// broadcast mode switch if necessary
+					srn.transport.Send(srn.broadcastCurrentMode(pManagerStg, srn.term))
 					// leader already processed 'MsgSnap' and signaled
 					notifyc <- struct{}{}
 				}
@@ -333,24 +326,25 @@ func (srn *SaucrRaftNode) processMessages(ms []raftpb.Message) []raftpb.Message 
 	return ms
 }
 
-func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PerceptibleConfig, term uint64) []raftpb.Message {
+func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy, term uint64) []raftpb.Message {
 	if cfg != nil {
 		var mType raftpb.MessageType
-		if cfg.Critical {
+		if cfg.Fsync {
 			mType = raftpb.MsgSaucrSheltering
 		} else {
 			mType = raftpb.MsgSaucrNormal
 		}
-		msg := make([]raftpb.Message, len(cfg.Peers)-1)
+		msg := make([]raftpb.Message, len(srn.peers)-1)
 		count := 0
-		for _, peer := range cfg.Peers {
-			if peer != cfg.Self {
+		for _, peer := range srn.peers {
+			if peer != srn.self {
 				msg[count] = raftpb.Message{
 					Type: mType,
 					To:   peer,
-					From: cfg.Self,
+					From: srn.self,
 					Term: term,
 				}
+				count++
 			}
 		}
 		return msg
@@ -379,29 +373,18 @@ func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, st
 //
 // This function only updates PerceptibleConfig rather than Perceptible per se.
 // To be mentioned, this function calls only when it is in StateFollower
-func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h raftpb.HardState) *adaptive.PerceptibleConfig {
+func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h raftpb.HardState, isFollower bool) *adaptive.PerceptibleConfig {
 	if !raft.IsEmptyHardState(h) {
 		srn.term = h.Term
-		if msg, ok := srn.GetExactlyAndDropMsgSaucr(h.Term); ok {
-			if cfg == nil {
-				cfg = srn.PeerMonitor.GetConfig()
-			}
-			if msg.Type == raftpb.MsgSaucrNormal {
-				cfg.Critical = false
-			} else if msg.Type == raftpb.MsgSaucrSheltering {
-				cfg.Critical = true
-			}
+	}
+	if msg, ok := srn.GetExactlyAndDropMsgSaucr(srn.term); ok && isFollower {
+		if cfg == nil {
+			cfg = srn.PeerMonitor.GetConfig()
 		}
-	} else {
-		if msg, ok := srn.GetAndDropMsgSaucr(); ok {
-			if cfg == nil {
-				cfg = srn.PeerMonitor.GetConfig()
-			}
-			if msg.Type == raftpb.MsgSaucrNormal {
-				cfg.Critical = false
-			} else if msg.Type == raftpb.MsgSaucrSheltering {
-				cfg.Critical = true
-			}
+		if msg.Type == raftpb.MsgSaucrNormal {
+			cfg.Critical = false
+		} else if msg.Type == raftpb.MsgSaucrSheltering {
+			cfg.Critical = true
 		}
 	}
 
@@ -438,38 +421,19 @@ func (srn *SaucrRaftNode) ReceiveMsgSaucr(message raftpb.Message) {
 	}
 }
 
-func (srn *SaucrRaftNode) DropMsgSaucr() {
-	srn.msgSaucrMu.Lock()
-	defer srn.msgSaucrMu.Unlock()
-
-	srn.msgSaucrEmpty = true
-}
-
-func (srn *SaucrRaftNode) GetAndDropMsgSaucr() (raftpb.Message, bool) {
-	srn.msgSaucrMu.Lock()
-	defer srn.msgSaucrMu.Unlock()
-
-	if !srn.msgSaucrEmpty {
-		return srn.msgSaucrMessage, true
-	}
-
-	srn.msgSaucrEmpty = true
-
-	return raftpb.Message{}, false
-}
-
 func (srn *SaucrRaftNode) GetExactlyAndDropMsgSaucr(term uint64) (raftpb.Message, bool) {
 	srn.msgSaucrMu.Lock()
 	defer srn.msgSaucrMu.Unlock()
 
 	if !srn.msgSaucrEmpty && srn.msgSaucrTerm == term {
+		srn.msgSaucrTerm = term
+		srn.msgSaucrEmpty = true
 		return srn.msgSaucrMessage, true
+	} else {
+		srn.msgSaucrTerm = term
+		srn.msgSaucrEmpty = true
+		return raftpb.Message{}, false
 	}
-
-	srn.msgSaucrTerm = term
-	srn.msgSaucrEmpty = true
-
-	return raftpb.Message{}, false
 }
 
 func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pManagerStg *adaptive.PersistentStrategy) *SaucrRaftNode {
