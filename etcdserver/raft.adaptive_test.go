@@ -150,6 +150,10 @@ func (tsk *testSaucrKit) clearRecords(disk, network bool) {
 	}
 }
 
+func (tsk *testSaucrKit) waitForNotify() {
+	<-(<-tsk.srn.applyc).notifyc
+}
+
 func TestSaucrRaftNodeHeartbeatAndSelfAwareness(t *testing.T) {
 
 }
@@ -511,6 +515,11 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		ul := newTestSaucrKit(sl[1])
 		ul.init()
 
+		defer func() {
+			nl.srn.Stop()
+			ul.srn.Stop()
+		}()
+
 		l := nl.srn.peers[2]
 
 		nl.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: l, RaftState: raft.StateFollower}}
@@ -541,8 +550,369 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 	}
 }
 
-func TestSaucrRaftNodeModeSwitch(t *testing.T) {
+func TestSaucrFollowerStepOne(t *testing.T) {
+	var tests = make(map[string]func(t *testing.T))
 
+	tests["NFollower -> NFollower"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			2, 3, 0,
+			GetQAlloc("monopoly", 0),
+			GetMAlloc("uniform", NORMAL),
+		)
+
+		leaders := make([]*testSaucrKit, len(sLeaders))
+		for i := 0; i < len(sLeaders); i++ {
+			leaders[i] = newTestSaucrKit(sLeaders[i])
+			leaders[i].init()
+		}
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			for _, leader := range leaders {
+				leader.srn.Stop()
+			}
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		newTerm := uint64(0xcc)
+
+		errChan := make([]chan string, len(followers))
+
+		for i, follower := range followers {
+			errChan[i] = make(chan string)
+			go func(f *testSaucrKit, errC chan string) {
+				defer close(errC)
+
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrNormal, From: leaders[0].id, To: f.id})
+				f.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5)}
+				<-(<-f.srn.applyc).notifyc
+
+				if s, ok := f.testMode(NORMAL, "recv MsgNormal"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(false, "recv MsgNormal"); !ok {
+					errC <- s
+					return
+				}
+
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrSheltering, From: leaders[0].id, To: f.id})
+				f.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: leaders[1].id}, HardState: raftpb.HardState{Term: newTerm}, Entries: make([]raftpb.Entry, 5)}
+				f.waitForNotify()
+
+				if s, ok := f.testMode(NORMAL, "recv expired MsgSheltering"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(false, "recv expired MsgSheltering"); !ok {
+					errC <- s
+					return
+				}
+
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrSheltering, From: leaders[0].id, To: f.id})
+				f.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5)}
+				f.waitForNotify()
+
+				if s, ok := f.testMode(NORMAL, "recv expired MsgSheltering"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(false, "recv expired MsgSheltering"); !ok {
+					errC <- s
+					return
+				}
+			}(follower, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	tests["UFollower -> NFollower"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			1, 2, 0,
+			GetQAlloc("monopoly", 0),
+			GetMAlloc("uniform", SHELTERING),
+		)
+
+		leaders := make([]*testSaucrKit, len(sLeaders))
+		for i := 0; i < len(sLeaders); i++ {
+			leaders[i] = newTestSaucrKit(sLeaders[i])
+			leaders[i].init()
+		}
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			for _, leader := range leaders {
+				leader.srn.Stop()
+			}
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		errChan := make([]chan string, len(followers))
+
+		for i, follower := range followers {
+			errChan[i] = make(chan string)
+			go func(f *testSaucrKit, errC chan string) {
+				defer close(errC)
+				f.clearRecords(true, false)
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrNormal, From: leaders[0].id, To: f.id})
+				f.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5)}
+				f.waitForNotify()
+
+				if s, ok := f.testMode(NORMAL, "recv MsgNormal"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(false, "recv MsgNormal"); !ok {
+					errC <- s
+					return
+				}
+			}(follower, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	tests["NFollower -> UFollower"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			1, 2, 0,
+			GetQAlloc("monopoly", 0),
+			GetMAlloc("uniform", NORMAL),
+		)
+
+		leaders := make([]*testSaucrKit, len(sLeaders))
+		for i := 0; i < len(sLeaders); i++ {
+			leaders[i] = newTestSaucrKit(sLeaders[i])
+			leaders[i].init()
+		}
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			for _, leader := range leaders {
+				leader.srn.Stop()
+			}
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		errChan := make([]chan string, len(followers))
+
+		for i, follower := range followers {
+			errChan[i] = make(chan string)
+			go func(f *testSaucrKit, errC chan string) {
+				defer close(errC)
+
+				f.clearRecords(true, false)
+				f.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 6)}
+				ap := <-f.srn.applyc
+				<-ap.notifyc
+
+				if s, ok := f.testPersist(false, "pre-requests"); !ok {
+					errC <- s
+					return
+				}
+
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrSheltering, From: leaders[0].id, To: f.id})
+				f.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 4)}
+				ap = <-f.srn.applyc
+				<-ap.notifyc
+
+				if s, ok := f.testMode(SHELTERING, "recv MsgSaucrSheltering"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(true, "recv MsgSaucrSheltering"); !ok {
+					errC <- s
+					return
+				}
+
+				var count int
+				for _, action := range f.bareDisk.Action() {
+					if action.Name == "Save" {
+						count += action.Params[1].(int)
+					}
+				}
+
+				if count != 10 {
+					errC <- "not all entries have been persisted"
+					return
+				}
+			}(follower, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	tests["UFollower -> UFollower"] = func(t *testing.T) {
+		sLeaders, sFollowers, _ := GenerateDebugSaucrServers(
+			2, 3, 0,
+			GetQAlloc("leaderless"),
+			GetMAlloc("uniform", SHELTERING),
+		)
+
+		leaders := make([]*testSaucrKit, len(sLeaders))
+		for i := 0; i < len(sLeaders); i++ {
+			leaders[i] = newTestSaucrKit(sLeaders[i])
+			leaders[i].init()
+		}
+
+		followers := make([]*testSaucrKit, len(sFollowers))
+		for i := 0; i < len(sFollowers); i++ {
+			followers[i] = newTestSaucrKit(sFollowers[i])
+			followers[i].init()
+		}
+
+		defer func() {
+			for _, leader := range leaders {
+				leader.srn.Stop()
+			}
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		newTerm := uint64(0xcc)
+
+		errChan := make([]chan string, len(followers))
+
+		for i, follower := range followers {
+			errChan[i] = make(chan string)
+			go func(f *testSaucrKit, errC chan string) {
+				defer close(errC)
+
+				f.clearRecords(true, false)
+
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrNormal, From: leaders[0].id, To: f.id, Term: newTerm})
+				f.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5)}
+				f.waitForNotify()
+
+				if s, ok := f.testMode(SHELTERING, "recv MsgNormal too early"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(true, "recv MsgNormal too early"); !ok {
+					errC <- s
+					return
+				}
+
+				f.clearRecords(true, false)
+
+				f.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrSheltering, From: leaders[0].id, To: f.id, Term: newTerm})
+				f.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: leaders[0].id}, HardState: raftpb.HardState{Term: newTerm}, Entries: make([]raftpb.Entry, 5)}
+				f.waitForNotify()
+
+				if s, ok := f.testMode(SHELTERING, "recv MsgSheltering"); !ok {
+					errC <- s
+					return
+				}
+				if s, ok := f.testPersist(true, "recv MsgSheltering"); !ok {
+					errC <- s
+					return
+				}
+			}(follower, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	tests["Follower -> Candidate"] = func(t *testing.T) {
+		_, sFollower, _ := GenerateDebugSaucrServers(1, 2, 0, GetQAlloc("table", []int{0, -1}), GetMAlloc("bi-partitioned"))
+
+		followers := make([]*testSaucrKit, len(sFollower))
+
+		for i, s := range sFollower {
+			followers[i] = newTestSaucrKit(s)
+			followers[i].init()
+		}
+
+		defer func() {
+			for _, follower := range followers {
+				follower.srn.Stop()
+			}
+		}()
+
+		nf := followers[0]
+
+		nf.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 4)}
+		nf.waitForNotify()
+
+		if s, ok := nf.testPersist(false, "pre-request"); !ok {
+			t.Error(s)
+		}
+
+		for _, follower := range followers {
+			follower.raft.readyc <- raft.Ready{
+				SoftState: &raft.SoftState{Lead: raft.None, RaftState: raft.StateCandidate},
+				HardState: raftpb.HardState{Term: rand.Uint64(), Vote: follower.id},
+				Entries:   make([]raftpb.Entry, 6),
+			}
+
+			follower.waitForNotify()
+
+			if follower.pMonitor.GetConfig().State != raft.StateCandidate {
+				t.Error("role change failed")
+			}
+
+			if s, ok := follower.testMode(SHELTERING, "after change"); !ok {
+				t.Error(s)
+			}
+
+			if s, ok := follower.testPersist(true, "after change"); !ok {
+				t.Error(s)
+			}
+		}
+
+		var count int
+		for _, action := range nf.bareDisk.Action() {
+			if action.Name == "Save" {
+				count += action.Params[1].(int)
+			}
+		}
+
+		if count != 10 {
+			t.Error("not all entries have been persisted")
+		}
+	}
+
+	for k, v := range tests {
+		t.Run(k, v)
+	}
 }
 
 func TestNewSaucrRaftNode(t *testing.T) {
