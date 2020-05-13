@@ -197,7 +197,7 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		}
 
 		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
-		<-leader.srn.applyc
+		leader.waitForNotify()
 
 		if s, ok := leader.testMode(NORMAL, "init hb"); !ok {
 			t.Error(s)
@@ -267,7 +267,7 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
 
 		//ap := <-leader.srn.applyc
-		<-leader.srn.applyc
+		leader.waitForNotify()
 
 		if s, ok := leader.testPersist(true, "init"); !ok {
 			t.Error(s)
@@ -322,8 +322,7 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		}
 
 		leader.raft.readyc <- raft.Ready{HardState: raftpb.HardState{Term: term}, Entries: make([]raftpb.Entry, 5), Messages: hb}
-		ap := <-leader.srn.applyc
-		<-ap.notifyc
+		leader.waitForNotify()
 
 		time.After(300 * time.Millisecond)
 
@@ -393,7 +392,7 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 
 		for i := 0; i < 2; i++ {
 			leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
-			<-leader.srn.applyc
+			leader.waitForNotify()
 		}
 
 		if s, ok := leader.testMode(NORMAL, "before transformation"); !ok {
@@ -418,8 +417,7 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		leader.clearRecords(false, true)
 
 		leader.raft.readyc <- raft.Ready{HardState: raftpb.HardState{Term: term}, Entries: make([]raftpb.Entry, 5), Messages: hb}
-		ap := <-leader.srn.applyc
-		<-ap.notifyc
+		leader.waitForNotify()
 
 		time.After(300 * time.Millisecond)
 
@@ -492,7 +490,7 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		}
 
 		leader.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5), Messages: hb}
-		<-leader.srn.applyc
+		leader.waitForNotify()
 
 		if s, ok := leader.testMode(SHELTERING, "init hb"); !ok {
 			t.Error(s)
@@ -525,8 +523,8 @@ func TestSaucrLeaderStepOne(t *testing.T) {
 		nl.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: l, RaftState: raft.StateFollower}}
 		ul.raft.readyc <- raft.Ready{SoftState: &raft.SoftState{Lead: l, RaftState: raft.StateFollower}}
 
-		<-nl.srn.applyc
-		<-ul.srn.applyc
+		nl.waitForNotify()
+		ul.waitForNotify()
 
 		if nl.pMonitor.GetConfig().Leader != l || ul.pMonitor.GetConfig().Leader != l {
 			t.Error("leader has not update")
@@ -912,6 +910,194 @@ func TestSaucrFollowerStepOne(t *testing.T) {
 
 	for k, v := range tests {
 		t.Run(k, v)
+	}
+}
+
+func TestSaucrCandidateStepOne(t *testing.T) {
+	tests := make(map[string]func(t *testing.T))
+
+	tests["Candidate -> Candidate"] = func(t *testing.T) {
+		_, _, sCandidates := GenerateDebugSaucrServers(
+			0, 0, 3,
+			GetQAlloc("leaderless"),
+			GetMAlloc("uniform", SHELTERING),
+		)
+
+		candidates := make([]*testSaucrKit, len(sCandidates))
+
+		for i, candidate := range sCandidates {
+			candidates[i] = newTestSaucrKit(candidate)
+			candidates[i].init()
+
+			if s, ok := candidates[i].testMode(SHELTERING, "init"); !ok {
+				t.Error(s)
+			}
+		}
+
+		defer func() {
+			for _, candidate := range candidates {
+				candidate.srn.Stop()
+			}
+		}()
+
+		errChan := make([]chan string, len(candidates))
+
+		for i, candidate := range candidates {
+			errChan[i] = make(chan string)
+			go func(c *testSaucrKit, errC chan string) {
+				defer close(errC)
+				c.clearRecords(true, false)
+
+				c.srv.Process(nil, raftpb.Message{Type: raftpb.MsgSaucrNormal})
+				c.raft.readyc <- raft.Ready{Entries: make([]raftpb.Entry, 5)}
+				c.waitForNotify()
+
+				if s, ok := c.testMode(SHELTERING, "after recv MsgNormal"); !ok {
+					errC <- s
+					return
+				}
+
+				if s, ok := c.testPersist(true, "after recv MsgNormal"); !ok {
+					errC <- s
+					return
+				}
+			}(candidate, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	tests["Candidate -> ULeader"] = func(t *testing.T) {
+		_, _, sCandidates := GenerateDebugSaucrServers(0, 0, 3, nil, GetMAlloc("uniform", SHELTERING))
+
+		candidates := make([]*testSaucrKit, len(sCandidates))
+
+		for i, candidate := range sCandidates {
+			candidates[i] = newTestSaucrKit(candidate)
+			candidates[i].init()
+		}
+
+		defer func() {
+			for _, candidate := range candidates {
+				candidate.srn.Stop()
+			}
+		}()
+
+		errChan := make([]chan string, len(candidates))
+
+		for i, candidate := range candidates {
+			errChan[i] = make(chan string)
+			go func(c *testSaucrKit, errC chan string) {
+				defer close(errC)
+
+				term := rand.Uint64()
+				c.clearRecords(true, false)
+
+				c.raft.readyc <- raft.Ready{
+					SoftState: &raft.SoftState{Lead: c.id, RaftState: raft.StateLeader},
+					HardState: raftpb.HardState{Term: term},
+					Entries:   make([]raftpb.Entry, 5),
+				}
+				c.waitForNotify()
+
+				if s, ok := c.testMode(SHELTERING, "after change"); !ok {
+					errC <- s
+					return
+				}
+
+				if s, ok := c.testPersist(true, "after change"); !ok {
+					errC <- s
+					return
+				}
+
+				if c.pMonitor.GetConfig().Leader != c.id || c.pMonitor.GetConfig().State != raft.StateLeader {
+					errC <- "leader and role has not changed"
+					return
+				}
+
+				if c.srn.term != term || c.srn.msgSaucrTerm != term {
+					errC <- "term has not changed"
+					return
+				}
+			}(candidate, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	tests["Candidate -> UFollower"] = func(t *testing.T) {
+		sLeader, _, sCandidates := GenerateDebugSaucrServers(1, 0, 3, nil, GetMAlloc("uniform", SHELTERING))
+
+		leader := newTestSaucrKit(sLeader[0])
+		candidates := make([]*testSaucrKit, len(sCandidates))
+
+		for i, candidate := range sCandidates {
+			candidates[i] = newTestSaucrKit(candidate)
+			candidates[i].init()
+		}
+
+		defer func() {
+			for _, candidate := range candidates {
+				candidate.srn.Stop()
+			}
+		}()
+
+		errChan := make([]chan string, len(candidates))
+
+		for i, candidate := range candidates {
+			errChan[i] = make(chan string)
+			go func(c *testSaucrKit, errC chan string) {
+				defer close(errC)
+
+				term := rand.Uint64()
+				c.clearRecords(true, false)
+
+				c.raft.readyc <- raft.Ready{
+					SoftState: &raft.SoftState{Lead: leader.id, RaftState: raft.StateFollower},
+					HardState: raftpb.HardState{Term: term},
+					Entries:   make([]raftpb.Entry, 5),
+				}
+				c.waitForNotify()
+
+				if s, ok := c.testMode(SHELTERING, "after change"); !ok {
+					errC <- s
+					return
+				}
+
+				if s, ok := c.testPersist(true, "after change"); !ok {
+					errC <- s
+					return
+				}
+
+				if c.pMonitor.GetConfig().Leader != leader.id || c.pMonitor.GetConfig().State != raft.StateFollower {
+					errC <- "leader and role has not changed"
+					return
+				}
+
+				if c.srn.term != term || c.srn.msgSaucrTerm != term {
+					errC <- "term has not changed"
+					return
+				}
+			}(candidate, errChan[i])
+		}
+
+		for i, e := range errChan {
+			for err := range e {
+				t.Error("from [", i, "]: ", err)
+			}
+		}
+	}
+
+	for s, f := range tests {
+		t.Run(s, f)
 	}
 }
 
