@@ -2,14 +2,13 @@ package utils
 
 import (
 	"go.etcd.io/etcd/embed"
-	"log"
-	"time"
 )
 
-type Scheduler func(int, *embed.Etcd)
+type Scheduler func(int, *embed.Etcd) <-chan struct{}
 
-var DonNothing Scheduler = func(int, *embed.Etcd) {}
+var DonNothing Scheduler = func(int, *embed.Etcd) <-chan struct{} { return make(chan struct{}) }
 
+/*
 func GetTimeoutScheduler(d time.Duration) Scheduler {
 	return func(idx int, e *embed.Etcd) {
 		select {
@@ -22,3 +21,4 @@ func GetTimeoutScheduler(d time.Duration) Scheduler {
 		log.Fatal(<-e.Err())
 	}
 }
+*/
