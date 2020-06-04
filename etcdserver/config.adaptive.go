@@ -1,6 +1,14 @@
 package etcdserver
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
+
+type SaucrConfig struct {
+	MaxLocalCacheSize int
+	CachePreserveTime time.Duration
+}
 
 type SaucrMode uint8
 

@@ -4,9 +4,13 @@ import (
 	"go.etcd.io/etcd/embed"
 )
 
-type Scheduler func(int, *embed.Etcd) <-chan struct{}
+type Scheduler struct {
+	do  func(int, *embed.Etcd)
+	err chan error
+	end chan struct{}
+}
 
-var DonNothing Scheduler = func(int, *embed.Etcd) <-chan struct{} { return make(chan struct{}) }
+var DoNothing = Scheduler{do: func(int, *embed.Etcd) {}, err: make(chan error, 100), end: make(chan struct{})}
 
 /*
 func GetTimeoutScheduler(d time.Duration) Scheduler {

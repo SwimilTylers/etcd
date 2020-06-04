@@ -7,8 +7,8 @@ import (
 
 var DefaultStrategy = &PersistentStrategy{
 	Fsync:             false,
-	MaxLocalCacheSize: 500,
-	CachePreserveTime: 10 * time.Second,
+	MaxLocalCacheSize: 5000,
+	CachePreserveTime: 30 * time.Second,
 }
 
 type PersistentConfig struct {

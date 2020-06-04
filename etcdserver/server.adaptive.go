@@ -338,7 +338,7 @@ func isMsgSaucr(mType raftpb.MessageType) bool {
 		mType == raftpb.MsgSaucrSheltering || mType == raftpb.MsgSaucrShelteringResp
 }
 
-func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
+func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServer, err error) {
 	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
 
 	var (
@@ -429,8 +429,6 @@ func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
 		id, n, s, w = startNode(cfg, cl, nil)
 		cl.SetID(id, existingCluster.ID())
 
-		mode = NORMAL
-
 	case !haveWAL && cfg.NewCluster:
 		if err = cfg.VerifyBootstrap(); err != nil {
 			return nil, err
@@ -465,8 +463,6 @@ func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
 		cl.SetBackend(be)
 		id, n, s, w = startNode(cfg, cl, cl.MemberIDs())
 		cl.SetID(id, cl.ID())
-
-		mode = NORMAL
 
 	case haveWAL:
 		if err = fileutil.IsDirWriteable(cfg.MemberDir()); err != nil {
@@ -535,8 +531,6 @@ func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
 			id, cl, n, s, w = restartAsStandaloneNode(cfg, snapshot)
 		}
 
-		mode = SHELTERING
-
 		cl.SetStore(st)
 		cl.SetBackend(be)
 		cl.Recover(api.UpdateCapability)
@@ -561,6 +555,9 @@ func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
 		peers[i] = uint64(peerIds[i])
 	}
 
+	// all nodes should start from sheltering-follower
+	mode = SHELTERING
+
 	pMonitorCfg := &adaptive.PerceptibleConfig{
 		State:    raft.StateFollower,
 		Leader:   raft.None,
@@ -569,10 +566,21 @@ func NewEtcdSaucrServer(cfg ServerConfig) (srv *EtcdSaucrServer, err error) {
 		Peers:    peers,
 	}
 
+	var mlcs int
+	var cpt time.Duration
+
+	if sCfg != nil {
+		mlcs = sCfg.MaxLocalCacheSize
+		cpt = sCfg.CachePreserveTime
+	} else {
+		mlcs = adaptive.DefaultStrategy.MaxLocalCacheSize
+		cpt = adaptive.DefaultStrategy.CachePreserveTime
+	}
+
 	pManagerStg := &adaptive.PersistentStrategy{
 		Fsync:             mode.IsFsync(),
-		MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
-		CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
+		MaxLocalCacheSize: mlcs,
+		CachePreserveTime: cpt,
 	}
 
 	sstats := stats.NewServerStats(cfg.Name, id.String())

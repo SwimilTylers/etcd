@@ -179,6 +179,14 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 								}
 							}
 						}
+					} else {
+						if srn.lg != nil {
+							srn.lg.Info("succeed to transform the mode of PManager",
+								zap.Bool("is-leader", isLead),
+								zap.Bool("is-follower", isFollower),
+								zap.Bool("to-fsync", pManagerStg.Fsync),
+							)
+						}
 					}
 				}
 

@@ -5,38 +5,45 @@ import (
 	"log"
 )
 
-func StartNormal(cluster *cDescriptor, idx int) (*embed.Etcd, error) {
+func startOneNormal(cluster *cDescriptor, idx int) (*embed.Etcd, error) {
 	cfg := cluster.GetConfig(idx, embed.ClusterStateFlagNew)
 	return embed.StartEtcd(cfg)
 }
 
-func RunLocalCluster3(scheduler Scheduler) {
-	var srvs [3]*embed.Etcd
-	var waits [3]<-chan struct{}
-
-	for i := 0; i < len(srvs); i++ {
-		go func(idx int) {
-			var err error
-			srvs[idx], err = StartNormal(DefaultLocalCluster3, idx)
-			if err != nil {
-				log.Fatal(err)
-			}
-			waits[idx] = scheduler(idx, srvs[idx])
-		}(i)
-	}
-
-	for i := 0; i < 3; i++ {
-		select {
-		case <-waits[0]:
-			log.Println("Srv 0 is closed!")
-		case <-waits[1]:
-			log.Println("Srv 1 is closed!")
-		case <-waits[2]:
-			log.Println("Srv 2 is closed!")
+var NormalServerTestRunner = TestRunner{
+	Run1: nil,
+	Run3: func(scheduler Scheduler) {
+		s := make([]*embed.Etcd, 3)
+		for i := 0; i < 3; i++ {
+			go func(idx int) {
+				srv, err := startOneNormal(DefaultLocalCluster3, idx)
+				s[idx] = srv
+				if err != nil {
+					// if the server cannot init properly, stop the test immediately
+					scheduler.err <- err
+					scheduler.end <- struct{}{}
+					return
+				}
+				scheduler.do(idx, srv)
+			}(i)
 		}
-	}
-}
 
-func Main() {
-	RunLocalCluster3(DonNothing)
+		defer func() {
+			for _, etcd := range s {
+				etcd.Close()
+			}
+		}()
+
+		for {
+			select {
+			case e := <-scheduler.err:
+				log.Fatal(e)
+			case <-scheduler.end:
+				log.Println("NormalServerTestRunner.Run3 terminated!")
+				return
+			}
+		}
+	},
+	Run5: nil,
+	Run7: nil,
 }
