@@ -1,0 +1,28 @@
+package utils
+
+import (
+	"fmt"
+	"io/ioutil"
+	"os"
+	"strings"
+)
+
+func RemoveAllSrvInfo() error {
+	files, err := ioutil.ReadDir(".")
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		if file.IsDir() && strings.Contains(file.Name(), ".srv") {
+			if err := os.RemoveAll(file.Name()); err != nil {
+				fmt.Println(file.Name(), ": remove failed")
+				return err
+			} else {
+				fmt.Println(file.Name(), ": remove success")
+			}
+		}
+	}
+
+	return nil
+}

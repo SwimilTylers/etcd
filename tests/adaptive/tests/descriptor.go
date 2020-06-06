@@ -1,4 +1,4 @@
-package utils
+package tests
 
 import (
 	"go.etcd.io/etcd/embed"
@@ -60,6 +60,15 @@ func GetUrl(s string) *url.URL {
 	return u
 }
 
+var DefaultLocalCluster1 = &cDescriptor{
+	token: "test-local-1",
+	members: []*sDescriptor{
+		{"srv0", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
+	},
+	lg:     "zap",
+	output: embed.StdErrLogOutput,
+}
+
 var DefaultLocalCluster3 = &cDescriptor{
 	token: "test-local-3",
 	members: []*sDescriptor{
@@ -79,6 +88,21 @@ var DefaultLocalCluster5 = &cDescriptor{
 		{"srv2", GetUrl("http://127.0.0.1:32379"), GetUrl("http://127.0.0.1:32380")},
 		{"srv3", GetUrl("http://127.0.0.1:42379"), GetUrl("http://127.0.0.1:42380")},
 		{"srv4", GetUrl("http://127.0.0.1:52379"), GetUrl("http://127.0.0.1:52380")},
+	},
+	lg:     "zap",
+	output: embed.StdErrLogOutput,
+}
+
+var DefaultLocalCluster7 = &cDescriptor{
+	token: "test-local-7",
+	members: []*sDescriptor{
+		{"srv0", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
+		{"srv1", GetUrl("http://127.0.0.1:22379"), GetUrl("http://127.0.0.1:22380")},
+		{"srv2", GetUrl("http://127.0.0.1:32379"), GetUrl("http://127.0.0.1:32380")},
+		{"srv3", GetUrl("http://127.0.0.1:42379"), GetUrl("http://127.0.0.1:42380")},
+		{"srv4", GetUrl("http://127.0.0.1:52379"), GetUrl("http://127.0.0.1:52380")},
+		{"srv5", GetUrl("http://127.0.0.1:62379"), GetUrl("http://127.0.0.1:62380")},
+		{"srv6", GetUrl("http://127.0.0.1:72379"), GetUrl("http://127.0.0.1:72380")},
 	},
 	lg:     "zap",
 	output: embed.StdErrLogOutput,

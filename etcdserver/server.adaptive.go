@@ -587,26 +587,25 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 	lstats := stats.NewLeaderStats(id.String())
 
 	heartbeat := time.Duration(cfg.TickMs) * time.Millisecond
-	rn := newRaftNode(
-		raftNodeConfig{
-			lg:          cfg.Logger,
-			isIDRemoved: func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
-			Node:        n,
-			heartbeat:   heartbeat,
-			raftStorage: s,
-			storage:     NewStorage(w, ss),
-		},
-	)
 	srv = &EtcdSaucrServer{
 		EtcdServer: &EtcdServer{
-			readych:          make(chan struct{}),
-			Cfg:              cfg,
-			lgMu:             new(sync.RWMutex),
-			lg:               cfg.Logger,
-			errorc:           make(chan error, 1),
-			v2store:          st,
-			snapshotter:      ss,
-			r:                *rn,
+			readych:     make(chan struct{}),
+			Cfg:         cfg,
+			lgMu:        new(sync.RWMutex),
+			lg:          cfg.Logger,
+			errorc:      make(chan error, 1),
+			v2store:     st,
+			snapshotter: ss,
+			r: *newRaftNode(
+				raftNodeConfig{
+					lg:          cfg.Logger,
+					isIDRemoved: func(id uint64) bool { return cl.IsIDRemoved(types.ID(id)) },
+					Node:        n,
+					heartbeat:   heartbeat,
+					raftStorage: s,
+					storage:     NewStorage(w, ss),
+				},
+			),
 			id:               id,
 			attributes:       membership.Attributes{Name: cfg.Name, ClientURLs: cfg.ClientURLs.StringSlice()},
 			cluster:          cl,
@@ -618,8 +617,11 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 			forceVersionC:    make(chan struct{}),
 			AccessController: &AccessController{CORS: cfg.CORS, HostWhitelist: cfg.HostWhitelist},
 		},
-		srn: NewSaucrRaftNode(rn, pMonitorCfg, pManagerStg),
 	}
+
+	// todo: check if a wrapper is necessary
+	// rn.storage = srv.srn.PManager
+
 	serverID.With(prometheus.Labels{"server_id": id.String()}).Set(1)
 
 	srv.applyV2 = &applierV2store{store: srv.v2store, cluster: srv.cluster}
@@ -729,6 +731,7 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 		}
 	}
 	srv.r.transport = tr
+	srv.srn = NewSaucrRaftNode(&(srv.r), pMonitorCfg, pManagerStg)
 
 	return srv, nil
 }

@@ -105,6 +105,18 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 						} else {
 							plog.Fatalf("failed to transform the mode of PMonitor: %v", err)
 						}
+					} else {
+						if srn.lg != nil {
+							srn.lg.Info(
+								"transform the mode of PMonitor",
+								zap.Error(err),
+								zap.Bool("is-leader", isLead),
+								zap.Bool("is-follower", isFollower),
+								zap.String("cfg", fmt.Sprintf("%+v", pMonitorCfg)),
+							)
+						} else {
+							plog.Info("transform the mode of PMonitor")
+						}
 					}
 				}
 
@@ -181,24 +193,22 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 						}
 					} else {
 						if srn.lg != nil {
-							srn.lg.Info("succeed to transform the mode of PManager",
+							srn.lg.Info("transform the mode of PManager",
 								zap.Bool("is-leader", isLead),
 								zap.Bool("is-follower", isFollower),
 								zap.Bool("to-fsync", pManagerStg.Fsync),
 							)
+						} else {
+							plog.Info("transform the mode of PManager")
 						}
 					}
 				}
 
 				if err := srn.PManager.Save(rd.HardState, rd.Entries); err != nil {
 					if srn.lg != nil {
-						s := srn.PManager.GetStrategy()
 						srn.lg.Fatal(
 							"failed to save Raft hard state and entries",
 							zap.Error(err),
-							zap.String("mode", "NORMAL -> SHELTERING"),
-							zap.Int("pm-local-cache-size", s.MaxLocalCacheSize),
-							zap.String("pm-cache-preserve-time", s.CachePreserveTime.String()),
 						)
 					} else {
 						plog.Fatalf("raft save state and entries error: %v", err)
@@ -456,7 +466,22 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 		return nil
 	}
 
-	monitor, err := adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, pMonitorCfg)
+	var monitor adaptive.Perceptible
+	var err error
+
+	if len(pMonitorCfg.Peers) < 3 {
+		if r.lg != nil {
+			r.lg.Info("Saucr requires a cluster of at least 3 peers",
+				zap.Int("peer-len", len(pMonitorCfg.Peers)),
+				zap.String("substitute", "DummyMonitor"),
+			)
+		} else {
+			plog.Infof("Saucr requires a cluster of at least 3 peers: using DummyMonitor")
+		}
+		monitor, err = adaptive.NewDummyMonitor(pMonitorCfg)
+	} else {
+		monitor, err = adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, pMonitorCfg)
+	}
 
 	if err != nil {
 		if r.lg != nil {
