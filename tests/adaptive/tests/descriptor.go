@@ -6,21 +6,21 @@ import (
 	"strings"
 )
 
-type sDescriptor struct {
+type SDescriptor struct {
 	name  string
 	cPort *url.URL
 	pPort *url.URL
 }
 
-type cDescriptor struct {
+type CDescriptor struct {
 	token   string
-	members []*sDescriptor
+	members []*SDescriptor
 
 	lg     string
 	output string
 }
 
-func (c *cDescriptor) Cluster() string {
+func (c *CDescriptor) Cluster() string {
 	var b strings.Builder
 	b.WriteString(c.members[0].name + "=" + c.members[0].pPort.String())
 	for i := 1; i < len(c.members); i++ {
@@ -29,7 +29,7 @@ func (c *cDescriptor) Cluster() string {
 	return b.String()
 }
 
-func (c *cDescriptor) GetConfig(idx int, clusterState string) *embed.Config {
+func (c *CDescriptor) GetConfig(idx int, clusterState string) *embed.Config {
 	cfg := embed.NewConfig()
 
 	var srv = c.members[idx]
@@ -55,23 +55,31 @@ func (c *cDescriptor) GetConfig(idx int, clusterState string) *embed.Config {
 	return cfg
 }
 
+func (c *CDescriptor) GetClientPorts() []string {
+	cps := make([]string, len(c.members))
+	for i, member := range c.members {
+		cps[i] = member.cPort.String()
+	}
+	return cps
+}
+
 func GetUrl(s string) *url.URL {
 	u, _ := url.Parse(s)
 	return u
 }
 
-var DefaultLocalCluster1 = &cDescriptor{
+var DefaultLocalCluster1 = &CDescriptor{
 	token: "test-local-1",
-	members: []*sDescriptor{
+	members: []*SDescriptor{
 		{"srv0", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
 	},
 	lg:     "zap",
 	output: embed.StdErrLogOutput,
 }
 
-var DefaultLocalCluster3 = &cDescriptor{
+var DefaultLocalCluster3 = &CDescriptor{
 	token: "test-local-3",
-	members: []*sDescriptor{
+	members: []*SDescriptor{
 		{"srv0", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
 		{"srv1", GetUrl("http://127.0.0.1:22379"), GetUrl("http://127.0.0.1:22380")},
 		{"srv2", GetUrl("http://127.0.0.1:32379"), GetUrl("http://127.0.0.1:32380")},
@@ -80,29 +88,29 @@ var DefaultLocalCluster3 = &cDescriptor{
 	output: embed.StdErrLogOutput,
 }
 
-var DefaultLocalCluster5 = &cDescriptor{
+var DefaultLocalCluster5 = &CDescriptor{
 	token: "test-local-5",
-	members: []*sDescriptor{
-		{"srv0", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
-		{"srv1", GetUrl("http://127.0.0.1:22379"), GetUrl("http://127.0.0.1:22380")},
-		{"srv2", GetUrl("http://127.0.0.1:32379"), GetUrl("http://127.0.0.1:32380")},
-		{"srv3", GetUrl("http://127.0.0.1:42379"), GetUrl("http://127.0.0.1:42380")},
-		{"srv4", GetUrl("http://127.0.0.1:52379"), GetUrl("http://127.0.0.1:52380")},
+	members: []*SDescriptor{
+		{"srv0", GetUrl("http://127.0.0.1:11379"), GetUrl("http://127.0.0.1:11380")},
+		{"srv1", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
+		{"srv2", GetUrl("http://127.0.0.1:13379"), GetUrl("http://127.0.0.1:13380")},
+		{"srv3", GetUrl("http://127.0.0.1:14379"), GetUrl("http://127.0.0.1:14380")},
+		{"srv4", GetUrl("http://127.0.0.1:15379"), GetUrl("http://127.0.0.1:15380")},
 	},
 	lg:     "zap",
 	output: embed.StdErrLogOutput,
 }
 
-var DefaultLocalCluster7 = &cDescriptor{
+var DefaultLocalCluster7 = &CDescriptor{
 	token: "test-local-7",
-	members: []*sDescriptor{
-		{"srv0", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
-		{"srv1", GetUrl("http://127.0.0.1:22379"), GetUrl("http://127.0.0.1:22380")},
-		{"srv2", GetUrl("http://127.0.0.1:32379"), GetUrl("http://127.0.0.1:32380")},
-		{"srv3", GetUrl("http://127.0.0.1:42379"), GetUrl("http://127.0.0.1:42380")},
-		{"srv4", GetUrl("http://127.0.0.1:52379"), GetUrl("http://127.0.0.1:52380")},
-		{"srv5", GetUrl("http://127.0.0.1:62379"), GetUrl("http://127.0.0.1:62380")},
-		{"srv6", GetUrl("http://127.0.0.1:72379"), GetUrl("http://127.0.0.1:72380")},
+	members: []*SDescriptor{
+		{"srv0", GetUrl("http://127.0.0.1:11379"), GetUrl("http://127.0.0.1:11380")},
+		{"srv1", GetUrl("http://127.0.0.1:12379"), GetUrl("http://127.0.0.1:12380")},
+		{"srv2", GetUrl("http://127.0.0.1:13379"), GetUrl("http://127.0.0.1:13380")},
+		{"srv3", GetUrl("http://127.0.0.1:14379"), GetUrl("http://127.0.0.1:14380")},
+		{"srv4", GetUrl("http://127.0.0.1:15379"), GetUrl("http://127.0.0.1:15380")},
+		{"srv5", GetUrl("http://127.0.0.1:16379"), GetUrl("http://127.0.0.1:16380")},
+		{"srv6", GetUrl("http://127.0.0.1:17379"), GetUrl("http://127.0.0.1:17380")},
 	},
 	lg:     "zap",
 	output: embed.StdErrLogOutput,

@@ -6,16 +6,16 @@ import (
 	"log"
 )
 
-func startOneSaucr(cluster *cDescriptor, idx int, sCfg *etcdserver.SaucrConfig) (*embed.Etcd, error) {
+func startOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig) (*embed.Etcd, error) {
 	cfg := cluster.GetConfig(idx, embed.ClusterStateFlagNew)
 	return embed.StartSaucrEtcd(cfg, sCfg)
 }
 
 var EtcdServerTestRunner = TestRunner{
 	Run1: func(scheduler Scheduler) {
-		cluster, sCfg := GlobalRunnerConfigs["c1"].(*cDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+		cluster, sCfg := GlobalRunnerConfigs["c1"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
 
-		srv, err := startOneSaucr(cluster, 0, sCfg)
+		srv, err := startOneSaucr(cluster, GlobalRunnerConfigs["standaloneIdx"].(int), sCfg)
 		if err != nil {
 			log.Fatal(err)
 			return
@@ -38,7 +38,7 @@ var EtcdServerTestRunner = TestRunner{
 		}
 	},
 	Run3: func(scheduler Scheduler) {
-		cluster, sCfg := GlobalRunnerConfigs["c3"].(*cDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+		cluster, sCfg := GlobalRunnerConfigs["c3"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
 
 		s := make([]*embed.Etcd, 3)
 		for i := 0; i < 3; i++ {
@@ -71,6 +71,72 @@ var EtcdServerTestRunner = TestRunner{
 			}
 		}
 	},
-	Run5: nil,
-	Run7: nil,
+	Run5: func(scheduler Scheduler) {
+		cluster, sCfg := GlobalRunnerConfigs["c5"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+
+		s := make([]*embed.Etcd, 5)
+		for i := 0; i < 5; i++ {
+			go func(idx int) {
+				srv, err := startOneSaucr(cluster, idx, sCfg)
+				s[idx] = srv
+				if err != nil {
+					// if the server cannot init properly, stop the test immediately
+					scheduler.err <- err
+					scheduler.end <- struct{}{}
+					return
+				}
+				scheduler.do(idx, srv)
+			}(i)
+		}
+
+		defer func() {
+			for _, etcd := range s {
+				etcd.Close()
+			}
+		}()
+
+		for {
+			select {
+			case e := <-scheduler.err:
+				log.Fatal(e)
+			case <-scheduler.end:
+				log.Println("EtcdServerTestRunner.Run5 terminated!")
+				return
+			}
+		}
+	},
+	Run7: func(scheduler Scheduler) {
+		cluster, sCfg := GlobalRunnerConfigs["c7"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+
+		s := make([]*embed.Etcd, 7)
+		for i := 0; i < 7; i++ {
+			go func(idx int) {
+				srv, err := startOneSaucr(cluster, idx, sCfg)
+				s[idx] = srv
+				if err != nil {
+					// if the server cannot init properly, stop the test immediately
+					scheduler.err <- err
+					scheduler.end <- struct{}{}
+					return
+				}
+				scheduler.do(idx, srv)
+			}(i)
+		}
+
+		defer func() {
+			for _, etcd := range s {
+				etcd.Close()
+			}
+		}()
+
+		for {
+			select {
+			case e := <-scheduler.err:
+				log.Fatal(e)
+			case <-scheduler.end:
+				log.Println("EtcdServerTestRunner.Run7 terminated!")
+				return
+			}
+		}
+	},
 }

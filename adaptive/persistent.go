@@ -7,7 +7,7 @@ import (
 
 var DefaultStrategy = &PersistentStrategy{
 	Fsync:             false,
-	MaxLocalCacheSize: 5000,
+	MaxLocalCacheSize: 50000,
 	CachePreserveTime: 30 * time.Second,
 }
 

@@ -24,4 +24,6 @@ func InitRunnerConfig() {
 		MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
 		CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
 	}
+
+	GlobalRunnerConfigs["standaloneIdx"] = 0
 }
