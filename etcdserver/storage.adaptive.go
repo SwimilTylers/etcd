@@ -67,18 +67,21 @@ func (lcd *LocalCachedDisk) flushInternal(callerName string, otherSourceHS raftp
 
 	// check if a dummy flush
 	if len(entries) == 0 {
-		err := lcd.disk.Save(hs, make([]raftpb.Entry, 0))
-		if lcd.logger != nil {
-			if err != nil {
-				lcd.logger.Error("error occurs when persist cached HardState",
-					zap.String("op", callerName),
-					zap.Error(err),
-				)
-			} else {
-				lcd.logger.Info("cached HardState persisted", zap.String("op", callerName))
+		if !raft.IsEmptyHardState(hs) {
+			err := lcd.disk.Save(hs, make([]raftpb.Entry, 0))
+			if lcd.logger != nil {
+				if err != nil {
+					lcd.logger.Error("error occurs when persist cached HardState",
+						zap.String("op", callerName),
+						zap.Error(err),
+					)
+				} else {
+					lcd.logger.Info("cached HardState persisted", zap.String("op", callerName))
+				}
 			}
+			return err
 		}
-		return err
+		return nil
 	}
 
 	err := lcd.disk.Save(hs, entries)

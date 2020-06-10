@@ -11,7 +11,18 @@ func startOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig) 
 	return embed.StartSaucrEtcd(cfg, sCfg)
 }
 
+func restartOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig) (*embed.Etcd, error) {
+	cfg := cluster.GetConfig(idx, embed.ClusterStateFlagExisting)
+	return embed.StartSaucrEtcd(cfg, sCfg)
+}
+
 var EtcdServerTestRunner = TestRunner{
+	Start: func(c *CDescriptor, idx int) (*embed.Etcd, error) {
+		return startOneSaucr(c, idx, GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig))
+	},
+	Restart: func(c *CDescriptor, idx int) (*embed.Etcd, error) {
+		return restartOneSaucr(c, idx, GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig))
+	},
 	Run1: func(scheduler Scheduler) {
 		cluster, sCfg := GlobalRunnerConfigs["c1"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
 
@@ -51,6 +62,7 @@ var EtcdServerTestRunner = TestRunner{
 					scheduler.end <- struct{}{}
 					return
 				}
+				<-srv.Server.ReadyNotify()
 				scheduler.do(idx, srv)
 			}(i)
 		}
@@ -85,6 +97,7 @@ var EtcdServerTestRunner = TestRunner{
 					scheduler.end <- struct{}{}
 					return
 				}
+				<-srv.Server.ReadyNotify()
 				scheduler.do(idx, srv)
 			}(i)
 		}
@@ -119,6 +132,7 @@ var EtcdServerTestRunner = TestRunner{
 					scheduler.end <- struct{}{}
 					return
 				}
+				<-srv.Server.ReadyNotify()
 				scheduler.do(idx, srv)
 			}(i)
 		}

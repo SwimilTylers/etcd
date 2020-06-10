@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"fmt"
 	"go.etcd.io/etcd/embed"
 	"net/url"
 	"strings"
@@ -49,7 +50,11 @@ func (c *CDescriptor) GetConfig(idx int, clusterState string) *embed.Config {
 		cfg.InitialCluster = c.Cluster()
 
 		cfg.Logger = c.lg
-		cfg.LogOutputs = []string{c.output}
+		if f, ok := GlobalRunnerConfigs["log-file-format"]; ok {
+			cfg.LogOutputs = []string{c.output, fmt.Sprintf(f.(string), idx, len(c.members))}
+		} else {
+			cfg.LogOutputs = []string{c.output}
+		}
 	}
 
 	return cfg

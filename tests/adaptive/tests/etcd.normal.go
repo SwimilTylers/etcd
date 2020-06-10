@@ -10,7 +10,14 @@ func startOneNormal(cluster *CDescriptor, idx int) (*embed.Etcd, error) {
 	return embed.StartEtcd(cfg)
 }
 
+func restartOneNormal(cluster *CDescriptor, idx int) (*embed.Etcd, error) {
+	cfg := cluster.GetConfig(idx, embed.ClusterStateFlagExisting)
+	return embed.StartEtcd(cfg)
+}
+
 var NormalServerTestRunner = TestRunner{
+	Start:   startOneNormal,
+	Restart: restartOneNormal,
 	Run1: func(scheduler Scheduler) {
 		srv, err := startOneNormal(GlobalRunnerConfigs["c1"].(*CDescriptor), GlobalRunnerConfigs["standaloneIdx"].(int))
 		if err != nil {
