@@ -28,6 +28,12 @@ type SaucrRaftNode struct {
 	// currentMode: NORMAL or SHELTERING
 	currentMode SaucrMode
 
+	// mode broadcast interval
+
+	syncMode    bool
+	syncModeLst time.Time
+	syncModeItv time.Duration
+
 	// PManager is a wrapper Storage with a memory cache.
 	// It can switch between on-cache mode and must-persist mode according to its fsync flag.
 	PManager adaptive.PersistentManager
@@ -365,10 +371,44 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 				count++
 			}
 		}
+		if srn.syncMode {
+			srn.syncModeLst = time.Now()
+		}
+		return msg
+	} else if srn.syncMode && srn.syncModeItv >= time.Now().Sub(srn.syncModeLst) {
+		var mType raftpb.MessageType
+		if srn.currentMode == SHELTERING {
+			mType = raftpb.MsgSaucrSheltering
+		} else {
+			mType = raftpb.MsgSaucrNormal
+		}
+		msg := make([]raftpb.Message, len(srn.peers)-1)
+		count := 0
+		for _, peer := range srn.peers {
+			if peer != srn.self {
+				msg[count] = raftpb.Message{
+					Type: mType,
+					To:   peer,
+					From: srn.self,
+					Term: term,
+				}
+				count++
+			}
+		}
+		srn.syncModeLst = time.Now()
 		return msg
 	} else {
 		return nil
 	}
+}
+
+func (srn *SaucrRaftNode) EnableSyncMode(itv time.Duration) {
+	srn.syncMode = true
+	srn.syncModeItv = itv
+}
+
+func (srn *SaucrRaftNode) DisableSyncMode() {
+	srn.syncMode = false
 }
 
 // updatePMonitorSoft behaves similar to the description in etcd-notes-saucr-implementation.md
@@ -396,12 +436,31 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 		srn.term = h.Term
 	}
 	if msg, ok := srn.GetExactlyAndDropMsgSaucr(srn.term); ok && isFollower {
-		if cfg == nil {
-			cfg = srn.PeerMonitor.GetConfig()
-		}
 		if msg.Type == raftpb.MsgSaucrNormal {
+			// if cfg is nil and current mode is consist with MsgType,
+			// that means no further update is necessary
+			if cfg == nil && srn.currentMode == NORMAL {
+				return nil
+			}
+
+			// Otherwise, we have to init the update, no matter whether cfg is nil
+
+			if cfg == nil {
+				cfg = srn.PeerMonitor.GetConfig()
+			}
 			cfg.Critical = false
 		} else if msg.Type == raftpb.MsgSaucrSheltering {
+			// if cfg is nil and current mode is consist with MsgType,
+			// that means no further update is necessary
+			if cfg == nil && srn.currentMode == SHELTERING {
+				return nil
+			}
+
+			// Otherwise, we have to init the update, no matter whether cfg is nil
+
+			if cfg == nil {
+				cfg = srn.PeerMonitor.GetConfig()
+			}
 			cfg.Critical = true
 		}
 	}
@@ -454,7 +513,7 @@ func (srn *SaucrRaftNode) GetExactlyAndDropMsgSaucr(term uint64) (raftpb.Message
 	}
 }
 
-func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pManagerStg *adaptive.PersistentStrategy) *SaucrRaftNode {
+func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pManagerStg *adaptive.PersistentStrategy, sConfig *SaucrConfig) *SaucrRaftNode {
 	if pManagerStg == nil || pMonitorCfg == nil {
 		if r.lg != nil {
 			r.lg.Fatal("SaucrRaftNode instantiation failed",
@@ -480,7 +539,7 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 		}
 		monitor, err = adaptive.NewDummyMonitor(pMonitorCfg)
 	} else {
-		monitor, err = adaptive.NewSaucrMonitor(r.lg, adaptive.CautiousHbCounterFactory, pMonitorCfg)
+		monitor, err = adaptive.NewSaucrMonitor(r.lg, sConfig.HbcounterType, pMonitorCfg)
 	}
 
 	if err != nil {
@@ -509,20 +568,14 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 
 	pManager := NewLocalCachedDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: pManagerStg})
 
-	var mode SaucrMode
-
-	if pManagerStg.Fsync {
-		mode = SHELTERING
-	} else {
-		mode = NORMAL
-	}
-
 	return &SaucrRaftNode{
 		raftNode:    r,
 		peers:       pMonitorCfg.Peers,
 		self:        pMonitorCfg.Self,
 		PeerMonitor: monitor,
-		currentMode: mode,
+		currentMode: GetModeFromFsync(pManagerStg.Fsync),
 		PManager:    pManager,
+		syncMode:    sConfig.SaucrModeSync,
+		syncModeItv: sConfig.SaucrModeItv,
 	}
 }

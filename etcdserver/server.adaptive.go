@@ -339,6 +339,10 @@ func isMsgSaucr(mType raftpb.MessageType) bool {
 }
 
 func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServer, err error) {
+	if sCfg == nil {
+		sCfg = DefaultSaucrConfig
+	}
+
 	st := v2store.New(StoreClusterPrefix, StoreKeysPrefix)
 
 	var (
@@ -566,21 +570,10 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 		Peers:    peers,
 	}
 
-	var mlcs int
-	var cpt time.Duration
-
-	if sCfg != nil {
-		mlcs = sCfg.MaxLocalCacheSize
-		cpt = sCfg.CachePreserveTime
-	} else {
-		mlcs = adaptive.DefaultStrategy.MaxLocalCacheSize
-		cpt = adaptive.DefaultStrategy.CachePreserveTime
-	}
-
 	pManagerStg := &adaptive.PersistentStrategy{
 		Fsync:             mode.IsFsync(),
-		MaxLocalCacheSize: mlcs,
-		CachePreserveTime: cpt,
+		MaxLocalCacheSize: sCfg.MaxLocalCacheSize,
+		CachePreserveTime: sCfg.CachePreserveTime,
 	}
 
 	sstats := stats.NewServerStats(cfg.Name, id.String())
@@ -620,7 +613,8 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 	}
 
 	// todo: check if a wrapper is necessary
-	// rn.storage = srv.srn.PManager
+	srv.srn = NewSaucrRaftNode(&(srv.r), pMonitorCfg, pManagerStg, sCfg)
+	srv.r.storage = srv.srn.PManager
 
 	serverID.With(prometheus.Labels{"server_id": id.String()}).Set(1)
 
@@ -730,8 +724,8 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 			tr.AddPeer(m.ID, m.PeerURLs)
 		}
 	}
+
 	srv.r.transport = tr
-	srv.srn = NewSaucrRaftNode(&(srv.r), pMonitorCfg, pManagerStg)
 
 	return srv, nil
 }

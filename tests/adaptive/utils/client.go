@@ -5,6 +5,7 @@ import (
 	"go.etcd.io/etcd/tests/adaptive/tests"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -26,7 +27,7 @@ func InitClientConfig() {
 
 		return builder.String()
 	}
-	GlobalClientConfig["bench-arg-format"] = "--endpoints=%s --clients=30 --conns=%d --sample put --key-size=8 --sequential-keys --total=100000 --val-size=256"
+	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --sample put --key-size=8 --sequential-keys --total=100000 --val-size=256"
 }
 
 func CreateBenchShell(size int) {
@@ -45,7 +46,9 @@ func CreateBenchShell(size int) {
 		tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)].(*tests.CDescriptor).GetClientPorts(),
 	)
 
-	args := fmt.Sprintf(GlobalClientConfig["bench-arg-format"].(string), srv, size)
+	args := GlobalClientConfig["bench-arg-format"].(string)
+	args = strings.ReplaceAll(args, "%edpts", srv)
+	args = strings.ReplaceAll(args, "%cns", strconv.Itoa(size))
 
 	_, _ = bench.WriteString(fmt.Sprintf("%s\n\n%s %s", GlobalClientConfig["shell"], benchCmd, args))
 }

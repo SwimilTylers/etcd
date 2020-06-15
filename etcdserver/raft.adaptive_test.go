@@ -1149,20 +1149,17 @@ func GenerateDebugSaucrServers(lNum, fNum, cNum int, qAlloc func(fIdx int) (lIdx
 			return cluster.IsIDRemoved(types.ID(id))
 		}
 
-		leaders[i].srn = NewSaucrRaftNode(
-			&leaders[i].r,
-			&adaptive.PerceptibleConfig{
-				State:    raft.StateLeader,
-				Leader:   peers[i],
-				Self:     peers[i],
-				Critical: mode.IsCritical(),
-				Peers:    peers,
-			}, &adaptive.PersistentStrategy{
-				Fsync:             mode.IsFsync(),
-				MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
-				CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
-			},
-		)
+		leaders[i].srn = NewSaucrRaftNode(&leaders[i].r, &adaptive.PerceptibleConfig{
+			State:    raft.StateLeader,
+			Leader:   peers[i],
+			Self:     peers[i],
+			Critical: mode.IsCritical(),
+			Peers:    peers,
+		}, &adaptive.PersistentStrategy{
+			Fsync:             mode.IsFsync(),
+			MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
+			CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
+		}, DefaultSaucrConfig)
 	}
 
 	followers = make([]*EtcdSaucrServer, fNum)
@@ -1198,20 +1195,17 @@ func GenerateDebugSaucrServers(lNum, fNum, cNum int, qAlloc func(fIdx int) (lIdx
 			return cluster.IsIDRemoved(types.ID(id))
 		}
 
-		followers[i].srn = NewSaucrRaftNode(
-			&followers[i].r,
-			&adaptive.PerceptibleConfig{
-				State:    raft.StateFollower,
-				Leader:   leader,
-				Self:     peers[i+lNum],
-				Critical: mode.IsCritical(),
-				Peers:    peers,
-			}, &adaptive.PersistentStrategy{
-				Fsync:             mode.IsFsync(),
-				MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
-				CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
-			},
-		)
+		followers[i].srn = NewSaucrRaftNode(&followers[i].r, &adaptive.PerceptibleConfig{
+			State:    raft.StateFollower,
+			Leader:   leader,
+			Self:     peers[i+lNum],
+			Critical: mode.IsCritical(),
+			Peers:    peers,
+		}, &adaptive.PersistentStrategy{
+			Fsync:             mode.IsFsync(),
+			MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
+			CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
+		}, DefaultSaucrConfig)
 	}
 
 	candidates = make([]*EtcdSaucrServer, cNum)
@@ -1238,20 +1232,17 @@ func GenerateDebugSaucrServers(lNum, fNum, cNum int, qAlloc func(fIdx int) (lIdx
 			return cluster.IsIDRemoved(types.ID(id))
 		}
 
-		candidates[i].srn = NewSaucrRaftNode(
-			&candidates[i].r,
-			&adaptive.PerceptibleConfig{
-				State:    raft.StateCandidate,
-				Leader:   raft.None,
-				Self:     peers[i+lNum+fNum],
-				Critical: mode.IsCritical(),
-				Peers:    peers,
-			}, &adaptive.PersistentStrategy{
-				Fsync:             mode.IsFsync(),
-				MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
-				CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
-			},
-		)
+		candidates[i].srn = NewSaucrRaftNode(&candidates[i].r, &adaptive.PerceptibleConfig{
+			State:    raft.StateCandidate,
+			Leader:   raft.None,
+			Self:     peers[i+lNum+fNum],
+			Critical: mode.IsCritical(),
+			Peers:    peers,
+		}, &adaptive.PersistentStrategy{
+			Fsync:             mode.IsFsync(),
+			MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
+			CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
+		}, DefaultSaucrConfig)
 	}
 
 	return leaders, followers, candidates

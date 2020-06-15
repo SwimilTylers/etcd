@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"go.etcd.io/etcd/embed"
 	"go.etcd.io/etcd/tests/adaptive/tests"
 	"go.etcd.io/etcd/tests/adaptive/utils"
 	"time"
@@ -10,6 +11,12 @@ import (
 func main() {
 	tests.InitRunnerConfig()
 	utils.InitClientConfig()
+
+	// change Global Args
+	tests.GlobalRunnerConfigs["remain-duration"] = 20 * time.Second
+	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
+	benchArgs[1]["total"] = "500000"
+	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 	if err := utils.RemoveAllSrvInfo(); err != nil {
 		fmt.Println("cannot remove all srv info: ", err)
@@ -25,22 +32,64 @@ func main() {
 		fmt.Println("all past srv log has been removed")
 	}
 
-	go utils.CreateBenchShell(5)
+	var size = 3
 
-	tests.GlobalRunnerConfigs["remain-duration"] = 20 * time.Second
+	go utils.CreateBenchShell(size)
 
-	tester := tests.EtcdServerTestRunner
+	tester := tests.NormalServerTestRunner
 
-	sch := tests.NewSchedulerBuilder(5).
-		Init().
-		Shutdown(20*time.Second, []int{0}).
-		Shutdown(20*time.Second, []int{1}).
-		Restart(20*time.Second, tester.Restart, []int{0}).
-		Restart(20*time.Second, tester.Restart, []int{1}).
-		Build()
+	sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
 
-	tester.Run5(sch)
+	// tests.TurnSaucrIntoVolatile()
+	// tests.TurnSaucrIntoPersistent()
+	Run(tester, size)(sch)
 
 	// tests.NormalServerTestRunner.Run7(tests.DoNothing)
 	// tests.EtcdServerTestRunner.Run5(tests.DoNothing)
+}
+
+func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, []int{0}).
+			Restart(itv, restart, []int{0}).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, []int{0}).
+			Shutdown(itv, []int{1}).
+			Restart(itv, restart, []int{0}).
+			Restart(itv, restart, []int{1}).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, []int{0}).
+			Shutdown(itv, []int{1}).
+			Shutdown(itv, []int{2}).
+			Restart(itv, restart, []int{0}).
+			Restart(itv, restart, []int{1}).
+			Restart(itv, restart, []int{2}).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func Run(runner tests.TestRunner, size int) func(scheduler tests.Scheduler) {
+	switch size {
+	case 1:
+		return runner.Run1
+	case 3:
+		return runner.Run3
+	case 5:
+		return runner.Run5
+	case 7:
+		return runner.Run7
+	default:
+		return nil
+	}
 }

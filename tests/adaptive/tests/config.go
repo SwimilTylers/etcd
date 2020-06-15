@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/etcdserver"
 	"time"
 )
@@ -18,10 +17,7 @@ func InitRunnerConfig() {
 
 	GlobalRunnerConfigs["remain-duration"] = 20 * time.Second
 
-	GlobalRunnerConfigs["saucr"] = &etcdserver.SaucrConfig{
-		MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
-		CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
-	}
+	GlobalRunnerConfigs["saucr"] = etcdserver.DefaultSaucrConfig
 
 	GlobalRunnerConfigs["standaloneIdx"] = 0
 }

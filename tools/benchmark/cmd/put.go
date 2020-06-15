@@ -55,6 +55,8 @@ var (
 	compactIndexDelta int64
 
 	checkHashkv bool
+
+	waitTimeout time.Duration
 )
 
 func init() {
@@ -69,6 +71,7 @@ func init() {
 	putCmd.Flags().DurationVar(&compactInterval, "compact-interval", 0, `Interval to compact database (do not duplicate this with etcd's 'auto-compaction-retention' flag) (e.g. --compact-interval=5m compacts every 5-minute)`)
 	putCmd.Flags().Int64Var(&compactIndexDelta, "compact-index-delta", 1000, "Delta between current revision and compact revision (e.g. current revision 10000, compact at 9000)")
 	putCmd.Flags().BoolVar(&checkHashkv, "check-hashkv", false, "'true' to check hashkv")
+	putCmd.Flags().DurationVar(&waitTimeout, "wait", 5*time.Minute, "Max duration for waiting for results")
 }
 
 func putFunc(cmd *cobra.Command, args []string) {
@@ -127,7 +130,18 @@ func putFunc(cmd *cobra.Command, args []string) {
 	}
 
 	rc := r.Run()
-	wg.Wait()
+	done := make(chan struct{})
+
+	go func() {
+		wg.Wait()
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(waitTimeout):
+		fmt.Println("=====> bench timeout <=====")
+	}
 	close(r.Results())
 	bar.Finish()
 	fmt.Println(<-rc)

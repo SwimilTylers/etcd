@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/embed"
 	"go.etcd.io/etcd/etcdserver"
 	"log"
@@ -153,4 +154,34 @@ var EtcdServerTestRunner = TestRunner{
 			}
 		}
 	},
+}
+
+func TurnSaucrIntoVolatile() (oldSCfg *etcdserver.SaucrConfig) {
+	oldSCfg = GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+
+	newSCfg := &etcdserver.SaucrConfig{
+		MaxLocalCacheSize: oldSCfg.MaxLocalCacheSize,
+		CachePreserveTime: oldSCfg.CachePreserveTime,
+		HbcounterType:     adaptive.AlwaysConnectHbCounterFactory,
+		SaucrModeSync:     oldSCfg.SaucrModeSync,
+		SaucrModeItv:      oldSCfg.SaucrModeItv,
+	}
+
+	GlobalRunnerConfigs["saucr"] = newSCfg
+	return oldSCfg
+}
+
+func TurnSaucrIntoPersistent() (oldSCfg *etcdserver.SaucrConfig) {
+	oldSCfg = GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+
+	newSCfg := &etcdserver.SaucrConfig{
+		MaxLocalCacheSize: oldSCfg.MaxLocalCacheSize,
+		CachePreserveTime: oldSCfg.CachePreserveTime,
+		HbcounterType:     adaptive.AlwaysDisconnectHbCounterFactory,
+		SaucrModeSync:     oldSCfg.SaucrModeSync,
+		SaucrModeItv:      oldSCfg.SaucrModeItv,
+	}
+
+	GlobalRunnerConfigs["saucr"] = newSCfg
+	return oldSCfg
 }

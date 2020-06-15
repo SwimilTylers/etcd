@@ -137,6 +137,20 @@ func (cbc *CustomizedBucketCounter) Init(positive bool) {
 	}
 }
 
+type DummyHbCounter struct {
+	always bool
+}
+
+func (d *DummyHbCounter) Positive() {}
+
+func (d *DummyHbCounter) Negative() {}
+
+func (d *DummyHbCounter) Report() bool {
+	return d.always
+}
+
+func (d *DummyHbCounter) Init(positive bool) {}
+
 func NaiveHbCounterFactory() HeartbeatCounter {
 	return &CustomizedBucketCounter{
 		counter: 0,
@@ -156,4 +170,12 @@ func CautiousHbCounterFactory() HeartbeatCounter {
 		counter: 0,
 		config:  CautiousCounterCfg,
 	}
+}
+
+func AlwaysConnectHbCounterFactory() HeartbeatCounter {
+	return &DummyHbCounter{true}
+}
+
+func AlwaysDisconnectHbCounterFactory() HeartbeatCounter {
+	return &DummyHbCounter{false}
 }

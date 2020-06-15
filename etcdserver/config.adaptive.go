@@ -1,6 +1,7 @@
 package etcdserver
 
 import (
+	"go.etcd.io/etcd/adaptive"
 	"strings"
 	"time"
 )
@@ -8,6 +9,19 @@ import (
 type SaucrConfig struct {
 	MaxLocalCacheSize int
 	CachePreserveTime time.Duration
+
+	HbcounterType func() adaptive.HeartbeatCounter
+
+	SaucrModeSync bool
+	SaucrModeItv  time.Duration
+}
+
+var DefaultSaucrConfig = &SaucrConfig{
+	MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
+	CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
+	HbcounterType:     adaptive.CautiousHbCounterFactory,
+	SaucrModeSync:     true,
+	SaucrModeItv:      1 * time.Second,
 }
 
 type SaucrMode uint8
