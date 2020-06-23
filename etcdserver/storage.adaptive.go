@@ -76,7 +76,7 @@ func (lcd *LocalCachedDisk) flushInternal(callerName string, otherSourceHS raftp
 						zap.Error(err),
 					)
 				} else {
-					lcd.logger.Info("cached HardState persisted", zap.String("op", callerName))
+					// lcd.logger.Info("cached HardState persisted", zap.String("op", callerName))
 				}
 			}
 			return err
@@ -98,7 +98,7 @@ func (lcd *LocalCachedDisk) flushInternal(callerName string, otherSourceHS raftp
 				zap.Error(err),
 			)
 		} else {
-			lcd.logger.Info("cached Entries and HardState persisted", zap.String("op", callerName))
+			// lcd.logger.Info("cached Entries and HardState persisted", zap.String("op", callerName))
 		}
 	}
 
