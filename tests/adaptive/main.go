@@ -15,7 +15,7 @@ func main() {
 	// change Global Args
 	tests.GlobalRunnerConfigs["remain-duration"] = 20 * time.Second
 	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-	benchArgs[1]["total"] = "500000"
+	benchArgs[1]["total"] = "800000"
 	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 	if err := utils.RemoveAllSrvInfo(); err != nil {
@@ -32,13 +32,15 @@ func main() {
 		fmt.Println("all past srv log has been removed")
 	}
 
-	var size = 3
+	var size = 7
 
 	go utils.CreateBenchShell(size)
 
 	tester := tests.NormalServerTestRunner
+	// tester := tests.EtcdServerTestRunner
 
-	sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
+	// sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
+	sch := tests.DoNothing
 
 	// tests.TurnSaucrIntoVolatile()
 	// tests.TurnSaucrIntoPersistent()
