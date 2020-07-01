@@ -44,8 +44,8 @@ func (sqd *SequentialRandomData) Init(dataSize int, workerNum int, bufferSize in
 		for i := wIdx; i < dataSize; i += gap {
 			k := make([]byte, sqd.keySize)
 			binary.PutVarint(k, int64(i))
-			sqd.requests <- clientv3.OpPut(string(k), string(v))
 			sqd.values[i] = v
+			sqd.requests <- clientv3.OpPut(string(k), string(v))
 		}
 	}
 

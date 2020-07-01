@@ -12,10 +12,12 @@ func main() {
 	tests.InitRunnerConfig()
 	utils.InitClientConfig()
 
+	utils.UseBenchTool()
+
 	// change Global Args
-	tests.GlobalRunnerConfigs["remain-duration"] = 20 * time.Second
+	tests.GlobalRunnerConfigs["remain-duration"] = 5 * time.Minute
 	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-	benchArgs[1]["total"] = "800000"
+	benchArgs[1]["total"] = "400000"
 	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 	if err := utils.RemoveAllSrvInfo(); err != nil {
@@ -32,22 +34,22 @@ func main() {
 		fmt.Println("all past srv log has been removed")
 	}
 
-	var size = 7
+	var size = 5
 
 	go utils.CreateBenchShell(size)
 
-	tester := tests.NormalServerTestRunner
-	// tester := tests.EtcdServerTestRunner
+	// tester := tests.NormalServerTestRunner
+	tester := tests.SaucrServerTestRunner
 
-	// sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
-	sch := tests.DoNothing
+	sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
+	// sch := tests.DoNothing
 
 	// tests.TurnSaucrIntoVolatile()
 	// tests.TurnSaucrIntoPersistent()
 	Run(tester, size)(sch)
 
 	// tests.NormalServerTestRunner.Run7(tests.DoNothing)
-	// tests.EtcdServerTestRunner.Run5(tests.DoNothing)
+	// tests.SaucrServerTestRunner.Run5(tests.DoNothing)
 }
 
 func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {

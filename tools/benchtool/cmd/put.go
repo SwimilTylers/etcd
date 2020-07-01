@@ -46,8 +46,7 @@ var (
 	compactIndexDelta int64
 
 	requestWait time.Duration
-
-	debugCount int32
+	verifyWait  time.Duration
 )
 
 func init() {
@@ -59,6 +58,7 @@ func init() {
 	putCmd.Flags().Int64Var(&compactIndexDelta, "compact-index-delta", 1000, "Delta between current revision and compact revision (e.g. current revision 10000, compact at 9000)")
 
 	putCmd.Flags().DurationVar(&requestWait, "request-wait-timeout", 150*time.Millisecond, "")
+	putCmd.Flags().DurationVar(&verifyWait, "verify-wait-timeout", 5*time.Second, "")
 }
 
 func putFunc(cmd *cobra.Command, args []string) {
@@ -105,7 +105,7 @@ func putFunc(cmd *cobra.Command, args []string) {
 	go func() {
 		wg.Wait()
 		bar.Finish()
-
+		<-time.After(verifyWait)
 		fmt.Println("Verifying now:")
 		bar = pb.New(putTotal)
 		bar.Format("Bom !")
@@ -160,9 +160,18 @@ func runClients(clients []*v3.Client, requests <-chan v3.Op, response func(op v3
 					limit.Wait(context.Background())
 				}
 
+				firstRequest := true
+
 				func() {
-					ctx, cancel := context.WithTimeout(context.Background(), requestWait)
-					defer cancel()
+					var ctx context.Context
+					if firstRequest {
+						ctx = context.Background()
+						firstRequest = false
+					} else {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithTimeout(context.Background(), requestWait)
+						defer cancel()
+					}
 
 					st := time.Now()
 					resp, err := c.Do(ctx, op)

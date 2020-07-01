@@ -17,7 +17,7 @@ func restartOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig
 	return embed.StartSaucrEtcd(cfg, sCfg)
 }
 
-var EtcdServerTestRunner = TestRunner{
+var SaucrServerTestRunner = TestRunner{
 	Start: func(c *CDescriptor, idx int) (*embed.Etcd, error) {
 		return startOneSaucr(c, idx, GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig))
 	},
@@ -79,7 +79,7 @@ var EtcdServerTestRunner = TestRunner{
 			case e := <-scheduler.err:
 				log.Fatal(e)
 			case <-scheduler.end:
-				log.Println("EtcdServerTestRunner.Run3 terminated!")
+				log.Println("SaucrServerTestRunner.Run3 terminated!")
 				return
 			}
 		}
@@ -114,7 +114,7 @@ var EtcdServerTestRunner = TestRunner{
 			case e := <-scheduler.err:
 				log.Fatal(e)
 			case <-scheduler.end:
-				log.Println("EtcdServerTestRunner.Run5 terminated!")
+				log.Println("SaucrServerTestRunner.Run5 terminated!")
 				return
 			}
 		}
@@ -149,7 +149,7 @@ var EtcdServerTestRunner = TestRunner{
 			case e := <-scheduler.err:
 				log.Fatal(e)
 			case <-scheduler.end:
-				log.Println("EtcdServerTestRunner.Run7 terminated!")
+				log.Println("SaucrServerTestRunner.Run7 terminated!")
 				return
 			}
 		}

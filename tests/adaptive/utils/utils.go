@@ -56,7 +56,7 @@ func ExtractArgs(args string, subCmd string) []map[string]string {
 			for _, kv := range kvs {
 				if len(kv) > 0 {
 					if strings.Contains(kv, "=") {
-						skv := strings.Split(kv, "=")
+						skv := strings.SplitN(kv, "=", 2)
 						dicts[i][skv[0]] = skv[1]
 					} else if kv != " " {
 						dicts[i][kv] = ""

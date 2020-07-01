@@ -30,6 +30,11 @@ func InitClientConfig() {
 	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --sample put --key-size=8 --sequential-keys --total=100000 --val-size=256"
 }
 
+func UseBenchTool() {
+	GlobalClientConfig["bench"] = "tools/benchtool/benchtool"
+	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --database=random[key-size=8,val-size=256] --sample put --total=100000"
+}
+
 func CreateBenchShell(size int) {
 	s, _ := exec.Command("pwd").Output()
 	var benchCmd string
