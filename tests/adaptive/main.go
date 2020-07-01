@@ -35,11 +35,12 @@ func main() {
 	}
 
 	var size = 5
+	tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
 
 	go utils.CreateBenchShell(size)
 
-	// tester := tests.NormalServerTestRunner
-	tester := tests.SaucrServerTestRunner
+	tester := tests.NormalServerTestRunner
+	// tester := tests.SaucrServerTestRunner
 
 	sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
 	// sch := tests.DoNothing

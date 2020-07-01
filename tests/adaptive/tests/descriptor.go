@@ -120,3 +120,20 @@ var DefaultLocalCluster7 = &CDescriptor{
 	lg:     "zap",
 	output: embed.StdErrLogOutput,
 }
+
+func MakeUniformCluster(size int, host string) *CDescriptor {
+	cluster := &CDescriptor{
+		token:  fmt.Sprintf("test-uniform-%d", size),
+		lg:     "zap",
+		output: embed.StdErrLogOutput,
+	}
+	cluster.members = make([]*SDescriptor, size)
+	for i := 0; i < size; i++ {
+		cluster.members[i] = &SDescriptor{
+			fmt.Sprintf("srv%d", i),
+			GetUrl(fmt.Sprintf("%s:1%d379", host, i+1)),
+			GetUrl(fmt.Sprintf("%s:1%d380", host, i+1)),
+		}
+	}
+	return cluster
+}
