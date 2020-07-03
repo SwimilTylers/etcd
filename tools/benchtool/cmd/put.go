@@ -19,13 +19,10 @@ import (
 	"fmt"
 	"go.etcd.io/etcd/tools/benchtool/data"
 	"math"
-	"sync"
 	"time"
 
-	v3 "go.etcd.io/etcd/clientv3"
-	"go.etcd.io/etcd/pkg/report"
-
 	"github.com/spf13/cobra"
+	v3 "go.etcd.io/etcd/clientv3"
 	"golang.org/x/time/rate"
 	"gopkg.in/cheggaaa/pb.v1"
 )
@@ -46,7 +43,6 @@ var (
 	compactIndexDelta int64
 
 	requestWait time.Duration
-	verifyWait  time.Duration
 )
 
 func init() {
@@ -58,7 +54,6 @@ func init() {
 	putCmd.Flags().Int64Var(&compactIndexDelta, "compact-index-delta", 1000, "Delta between current revision and compact revision (e.g. current revision 10000, compact at 9000)")
 
 	putCmd.Flags().DurationVar(&requestWait, "request-wait-timeout", 150*time.Millisecond, "")
-	putCmd.Flags().DurationVar(&verifyWait, "verify-wait-timeout", 5*time.Second, "")
 }
 
 func putFunc(cmd *cobra.Command, args []string) {
@@ -105,19 +100,7 @@ func putFunc(cmd *cobra.Command, args []string) {
 	go func() {
 		wg.Wait()
 		bar.Finish()
-		<-time.After(verifyWait)
-		fmt.Println("Verifying now:")
-		bar = pb.New(putTotal)
-		bar.Format("Bom !")
-		bar.Start()
-		database.InitValidate(putTotal, int(totalConns), int(totalClients))
-		wg = runClients(clients,
-			database.Requests(),
-			func(op v3.Op, opResponse v3.OpResponse) { database.Confirm() <- opResponse },
-			nil,
-			nil,
-		)
-		wg.Wait()
+
 		done <- struct{}{}
 	}()
 
@@ -126,10 +109,11 @@ func putFunc(cmd *cobra.Command, args []string) {
 	case <-stop:
 		fmt.Println("=====> bench timeout <=====")
 	}
+
 	close(r.Results())
-	bar.Finish()
 	fmt.Println(<-rc)
-	fmt.Println(database.Results())
+
+	_ = database.Store(vFile)
 }
 
 func compactKV(clients []*v3.Client) {
@@ -146,51 +130,6 @@ func compactKV(clients []*v3.Client) {
 	if err != nil {
 		panic(err)
 	}
-}
-
-func runClients(clients []*v3.Client, requests <-chan v3.Op, response func(op v3.Op, opResponse v3.OpResponse), limit *rate.Limiter, r report.Report) *sync.WaitGroup {
-	wg := &sync.WaitGroup{}
-	for i := range clients {
-		wg.Add(1)
-		go func(c *v3.Client) {
-			defer wg.Done()
-
-			for op := range requests {
-				if limit != nil {
-					limit.Wait(context.Background())
-				}
-
-				firstRequest := true
-
-				func() {
-					var ctx context.Context
-					if firstRequest {
-						ctx = context.Background()
-						firstRequest = false
-					} else {
-						var cancel context.CancelFunc
-						ctx, cancel = context.WithTimeout(context.Background(), requestWait)
-						defer cancel()
-					}
-
-					st := time.Now()
-					resp, err := c.Do(ctx, op)
-
-					if r != nil {
-						r.Results() <- report.Result{Err: err, Start: st, End: time.Now()}
-					}
-
-					if err == nil {
-						response(op, resp)
-					}
-				}()
-
-				bar.Increment()
-			}
-		}(clients[i])
-	}
-
-	return wg
 }
 
 func max(n1, n2 int64) int64 {

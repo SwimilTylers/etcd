@@ -54,3 +54,11 @@ func (d *dummyData) InitValidate(int, int, int) {}
 func (d *dummyData) Results() string {
 	return "you dummy"
 }
+
+func (d *dummyData) Load(file string) error {
+	return nil
+}
+
+func (d *dummyData) Store(file string) error {
+	return nil
+}

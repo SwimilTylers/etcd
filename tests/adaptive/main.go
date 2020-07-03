@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"go.etcd.io/etcd/embed"
 	"go.etcd.io/etcd/tests/adaptive/tests"
 	"go.etcd.io/etcd/tests/adaptive/utils"
+	"os"
 	"time"
 )
 
@@ -35,22 +37,25 @@ func main() {
 	}
 
 	var size = 5
-	tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
+	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
 
 	go utils.CreateBenchShell(size)
 
 	tester := tests.NormalServerTestRunner
 	// tester := tests.SaucrServerTestRunner
 
-	sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
+	// sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
 	// sch := tests.DoNothing
 
 	// tests.TurnSaucrIntoVolatile()
 	// tests.TurnSaucrIntoPersistent()
-	Run(tester, size)(sch)
+	// Run(tester, size)(sch)
 
 	// tests.NormalServerTestRunner.Run7(tests.DoNothing)
 	// tests.SaucrServerTestRunner.Run5(tests.DoNothing)
+	Pause("ready for validation")
+
+	Run(tester, size)(tests.DoNothing)
 }
 
 func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
@@ -97,4 +102,9 @@ func Run(runner tests.TestRunner, size int) func(scheduler tests.Scheduler) {
 	default:
 		return nil
 	}
+}
+
+func Pause(msg string) {
+	_, _ = os.Stdout.WriteString(msg)
+	_, _ = bufio.NewReader(os.Stdin).ReadByte()
 }

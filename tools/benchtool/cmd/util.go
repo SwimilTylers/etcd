@@ -18,8 +18,11 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"golang.org/x/time/rate"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bgentry/speakeasy"
 	"go.etcd.io/etcd/clientv3"
@@ -168,4 +171,49 @@ func newWeightedReport() report.Report {
 		return report.NewReportSample(p)
 	}
 	return report.NewWeightedReport(report.NewReport(p), p)
+}
+
+func runClients(clients []*clientv3.Client, requests <-chan clientv3.Op, response func(op clientv3.Op, opResponse clientv3.OpResponse), limit *rate.Limiter, r report.Report) *sync.WaitGroup {
+	wg := &sync.WaitGroup{}
+	for i := range clients {
+		wg.Add(1)
+		go func(c *clientv3.Client) {
+			defer wg.Done()
+
+			for op := range requests {
+				if limit != nil {
+					limit.Wait(context.Background())
+				}
+
+				firstRequest := true
+
+				func() {
+					var ctx context.Context
+					if firstRequest {
+						ctx = context.Background()
+						firstRequest = false
+					} else {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithTimeout(context.Background(), requestWait)
+						defer cancel()
+					}
+
+					st := time.Now()
+					resp, err := c.Do(ctx, op)
+
+					if r != nil {
+						r.Results() <- report.Result{Err: err, Start: st, End: time.Now()}
+					}
+
+					if err == nil {
+						response(op, resp)
+					}
+				}()
+
+				bar.Increment()
+			}
+		}(clients[i])
+	}
+
+	return wg
 }

@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"go.etcd.io/etcd/clientv3"
+	"io/ioutil"
 	"os"
 	"strconv"
 	"strings"
@@ -16,6 +18,67 @@ const (
 	RandDataOptKeySize   = "key-size"
 	RandDataOptValueSize = "val-size"
 )
+
+type RDRecords struct {
+	values [][]byte
+	sent   []bool
+}
+
+func (rdr *RDRecords) Marshal() []byte {
+	buffer := bytes.NewBuffer(nil)
+
+	cvtBuffer := make([]byte, 8)
+	binary.PutVarint(cvtBuffer, int64(len(rdr.values)))
+	buffer.Write(cvtBuffer)
+
+	binary.PutVarint(cvtBuffer, int64(len(rdr.values[0])))
+	buffer.Write(cvtBuffer)
+
+	for _, v := range rdr.values {
+		buffer.Write(v)
+	}
+
+	for _, s := range rdr.sent {
+		if s {
+			binary.PutVarint(cvtBuffer, 1)
+			buffer.Write(cvtBuffer)
+		} else {
+			binary.PutVarint(cvtBuffer, 0)
+			buffer.Write(cvtBuffer)
+		}
+	}
+
+	return buffer.Bytes()
+}
+
+func (rdr *RDRecords) Unmarshal(b []byte) error {
+	var length int64
+	var size int64
+
+	buffer := bytes.NewBuffer(b)
+
+	length, _ = binary.Varint(buffer.Next(8))
+	size, _ = binary.Varint(buffer.Next(8))
+
+	rdr.values = make([][]byte, length)
+	rdr.sent = make([]bool, length)
+
+	for i := 0; i < len(rdr.values); i++ {
+		rdr.values[i] = make([]byte, size)
+		if n, err := buffer.Read(rdr.values[i]); err == nil {
+			return err
+		} else if int64(n) != size {
+			return errors.New("not aligned")
+		}
+	}
+
+	for i := 0; i < len(rdr.sent); i++ {
+		signal, _ := binary.Varint(buffer.Next(8))
+		rdr.sent[i] = signal == 1
+	}
+
+	return nil
+}
 
 type SequentialRandomData struct {
 	*parallelData
@@ -33,7 +96,6 @@ type SequentialRandomData struct {
 func (sqd *SequentialRandomData) Init(dataSize int, workerNum int, bufferSize int) {
 	sqd.values = make([][]byte, dataSize)
 	sqd.sent = make([]bool, dataSize)
-	sqd.checked = make([]bool, dataSize)
 
 	sqd.wNum = workerNum
 
@@ -49,19 +111,27 @@ func (sqd *SequentialRandomData) Init(dataSize int, workerNum int, bufferSize in
 		}
 	}
 
+	sqd.aWorker = func(int) {
+		for ack := range sqd.ack {
+			k, _ := binary.Varint(ack.Op.KeyBytes())
+			sqd.sent[k] = bytes.Equal(ack.Op.ValueBytes(), sqd.values[k])
+		}
+	}
+
+	sqd.parallelData.Init(dataSize, workerNum, bufferSize)
+}
+
+func (sqd *SequentialRandomData) InitValidate(dataSize, workerNum, bufferSize int) {
+	sqd.checked = make([]bool, dataSize)
+
+	sqd.wNum = workerNum
+
 	sqd.rcWorker = func(wIdx int) {
 		gap := sqd.wNum
 		for i := wIdx; i < dataSize; i += gap {
 			k := make([]byte, sqd.keySize)
 			binary.PutVarint(k, int64(i))
 			sqd.requests <- clientv3.OpGet(string(k))
-		}
-	}
-
-	sqd.aWorker = func(int) {
-		for ack := range sqd.ack {
-			k, _ := binary.Varint(ack.Op.KeyBytes())
-			sqd.sent[k] = bytes.Equal(ack.Op.ValueBytes(), sqd.values[k])
 		}
 	}
 
@@ -99,7 +169,52 @@ func (sqd *SequentialRandomData) Init(dataSize int, workerNum int, bufferSize in
 		return fmt.Sprintf("Database checking:\ntotal: \t%d\ndrop: \t%d\nweird: \t%d\nlost: \t%d\nsucc: \t%d", len(sqd.values), drop, weird, lost, succ)
 	}
 
-	sqd.parallelData.Init(dataSize, workerNum, bufferSize)
+	sqd.parallelData.InitValidate(dataSize, workerNum, bufferSize)
+}
+
+func (sqd *SequentialRandomData) Load(file string) error {
+	f, err := os.Open(file)
+
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	if b, err := ioutil.ReadAll(f); err == nil {
+		rdr := &RDRecords{}
+		err = rdr.Unmarshal(b)
+
+		if err != nil {
+			return err
+		}
+
+		sqd.values = rdr.values
+		sqd.sent = rdr.sent
+
+		return nil
+	} else {
+		return err
+	}
+}
+
+func (sqd *SequentialRandomData) Store(file string) error {
+	store := &RDRecords{
+		values: sqd.values,
+		sent:   sqd.sent,
+	}
+
+	b := store.Marshal()
+	f, err := os.Create(file)
+
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	_, err = f.Write(b)
+	return err
 }
 
 func newRandValue(vSize int) []byte {

@@ -51,26 +51,10 @@ func (p *parallelData) Init(dataSize int, workerNum int, bufferSize int) {
 		p.iWg.Wait()
 		close(p.requests)
 	}()
-
-	p.info = make(chan string, bufferSize)
-	p.infoWait.Add(1)
-	go func() {
-		builder := strings.Builder{}
-		builder.WriteString("Some info from worker threads:\n")
-		defer p.infoWait.Done()
-		var entry int
-		for s := range p.info {
-			builder.WriteString(fmt.Sprintf("[%-3d]: %s\n", entry, s))
-			entry++
-		}
-		builder.WriteString("that's all")
-		p.infoAll = builder.String()
-	}()
+	p.initInfoThread(bufferSize)
 }
 
 func (p *parallelData) InitValidate(dataSize int, workerNum int, bufferSize int) {
-	close(p.ack)
-
 	p.requests = make(chan clientv3.Op, bufferSize)
 	p.confirm = make(chan clientv3.OpResponse, bufferSize)
 
@@ -87,6 +71,24 @@ func (p *parallelData) InitValidate(dataSize int, workerNum int, bufferSize int)
 	go func() {
 		p.cWg.Wait()
 		close(p.requests)
+	}()
+	p.initInfoThread(bufferSize)
+}
+
+func (p *parallelData) initInfoThread(bufferSize int) {
+	p.info = make(chan string, bufferSize)
+	p.infoWait.Add(1)
+	go func() {
+		builder := strings.Builder{}
+		builder.WriteString("Some info from worker threads:\n")
+		defer p.infoWait.Done()
+		var entry int
+		for s := range p.info {
+			builder.WriteString(fmt.Sprintf("[%-3d]: %s\n", entry, s))
+			entry++
+		}
+		builder.WriteString("that's all")
+		p.infoAll = builder.String()
 	}()
 }
 
@@ -113,6 +115,14 @@ func (p *parallelData) Results() string {
 	builder.WriteString("\n\n")
 	builder.WriteString(p.infoAll)
 	return builder.String()
+}
+
+func (p *parallelData) Load(file string) error {
+	return nil
+}
+
+func (p *parallelData) Store(file string) error {
+	return nil
 }
 
 func GetParallelDataCore() *parallelData {
