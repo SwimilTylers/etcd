@@ -25,7 +25,7 @@ func main() {
 	// clusters
 	tests.GlobalRunnerConfigs["available-machine"] = []string{
 		"http://192.168.198.137",
-		"http://",
+		"http://192.168.198.136",
 	}
 	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.137"
 
