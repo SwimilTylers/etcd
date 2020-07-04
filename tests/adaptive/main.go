@@ -66,7 +66,7 @@ func main() {
 	// tests.SaucrServerTestRunner.Run5(tests.DoNothing)
 	Pause("ready for validation")
 
-	Run(tester, size, selected)(tests.DoNothing)
+	Run(tester, size, selected...)(tests.DoNothing)
 }
 
 func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
@@ -100,7 +100,7 @@ func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, 
 	}
 }
 
-func Run(runner tests.TestRunner, size int, selected []int) func(scheduler tests.Scheduler) {
+func Run(runner tests.TestRunner, size int, selected ...int) func(scheduler tests.Scheduler) {
 	if selected == nil || len(selected) == 0 {
 		switch size {
 		case 1:
