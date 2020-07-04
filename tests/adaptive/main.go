@@ -22,6 +22,13 @@ func main() {
 	benchArgs[1]["total"] = "400000"
 	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
+	// clusters
+	tests.GlobalRunnerConfigs["available-machine"] = []string{
+		"http://192.168.198.137",
+		"http://",
+	}
+	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.137"
+
 	if err := utils.RemoveAllSrvInfo(); err != nil {
 		fmt.Println("cannot remove all srv info: ", err)
 		return
@@ -37,7 +44,11 @@ func main() {
 	}
 
 	var size = 5
+	var hosts []string
+	var selected []int
 	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
+	hosts, selected = GetRemoteCluster(size)
+	tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeDistinctCluster(hosts)
 
 	go utils.CreateBenchShell(size)
 
@@ -55,7 +66,7 @@ func main() {
 	// tests.SaucrServerTestRunner.Run5(tests.DoNothing)
 	Pause("ready for validation")
 
-	Run(tester, size)(tests.DoNothing)
+	Run(tester, size, selected)(tests.DoNothing)
 }
 
 func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
@@ -89,22 +100,48 @@ func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, 
 	}
 }
 
-func Run(runner tests.TestRunner, size int) func(scheduler tests.Scheduler) {
-	switch size {
-	case 1:
-		return runner.Run1
-	case 3:
-		return runner.Run3
-	case 5:
-		return runner.Run5
-	case 7:
-		return runner.Run7
-	default:
-		return nil
+func Run(runner tests.TestRunner, size int, selected []int) func(scheduler tests.Scheduler) {
+	if selected == nil || len(selected) == 0 {
+		switch size {
+		case 1:
+			return runner.Run1
+		case 3:
+			return runner.Run3
+		case 5:
+			return runner.Run5
+		case 7:
+			return runner.Run7
+		default:
+			return nil
+		}
+	} else {
+		if config, ok := tests.GlobalRunnerConfigs["cx"]; !ok {
+			tests.GlobalRunnerConfigs["cx"] = tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)]
+		} else if config.(*tests.CDescriptor).GetMemberNum() != size {
+			return nil
+		}
+		return func(s tests.Scheduler) { runner.RunX(selected, s) }
 	}
 }
 
 func Pause(msg string) {
 	_, _ = os.Stdout.WriteString(msg)
 	_, _ = bufio.NewReader(os.Stdin).ReadByte()
+}
+
+func GetRemoteCluster(size int) ([]string, []int) {
+	hosts := make([]string, size)
+	var selected []int
+	machine := tests.GlobalRunnerConfigs["available-machine"].([]string)
+	local := tests.GlobalRunnerConfigs["local-machine"].(string)
+	mLen := len(machine)
+	for mId := 0; mId < mLen; mId++ {
+		for sId := mId; sId < size; sId += mLen {
+			hosts[sId] = machine[mId]
+			if hosts[sId] == local {
+				selected = append(selected, sId)
+			}
+		}
+	}
+	return hosts, selected
 }

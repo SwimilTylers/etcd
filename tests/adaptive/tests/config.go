@@ -9,6 +9,7 @@ var GlobalRunnerConfigs = make(map[string]interface{})
 
 func InitRunnerConfig() {
 	GlobalRunnerConfigs["log-file-format"] = "etcd-%d-of-%d.log"
+	GlobalRunnerConfigs["scheduler-log-file"] = "sch.log"
 
 	GlobalRunnerConfigs["c1"] = DefaultLocalCluster1
 	GlobalRunnerConfigs["c3"] = DefaultLocalCluster3

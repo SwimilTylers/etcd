@@ -4,6 +4,7 @@ import (
 	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/embed"
 	"go.etcd.io/etcd/etcdserver"
+	"go.uber.org/zap"
 	"log"
 )
 
@@ -24,6 +25,43 @@ var SaucrServerTestRunner = TestRunner{
 	Restart: func(c *CDescriptor, idx int) (*embed.Etcd, error) {
 		return restartOneSaucr(c, idx, GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig))
 	},
+	RunX: func(selected []int, scheduler Scheduler) {
+		cluster, sCfg := GlobalRunnerConfigs["cx"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
+
+		s := make([]*embed.Etcd, len(selected))
+		for i := 0; i < len(s); i++ {
+			go func(idx int) {
+				srv, err := startOneSaucr(cluster, selected[idx], sCfg)
+				s[idx] = srv
+				if err != nil {
+					// if the server cannot init properly, stop the test immediately
+					scheduler.err <- err
+					scheduler.end <- struct{}{}
+					return
+				}
+				<-srv.Server.ReadyNotify()
+				scheduler.do(selected[idx], srv)
+			}(i)
+		}
+
+		defer func() {
+			for _, etcd := range s {
+				etcd.Close()
+			}
+		}()
+
+		logger, _ := GetSchedulerLogger()
+
+		for {
+			select {
+			case e := <-scheduler.err:
+				logger.Fatal("receive error from scheduler", zap.Error(e))
+			case <-scheduler.end:
+				logger.Info("SaucrServerTestRunner.RunX terminated!")
+				return
+			}
+		}
+	},
 	Run1: func(scheduler Scheduler) {
 		cluster, sCfg := GlobalRunnerConfigs["c1"].(*CDescriptor), GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
 
@@ -39,12 +77,14 @@ var SaucrServerTestRunner = TestRunner{
 
 		defer srv.Close()
 
+		logger, _ := GetSchedulerLogger()
+
 		for {
 			select {
 			case e := <-scheduler.err:
-				log.Fatal(e)
+				logger.Fatal("receive error from scheduler", zap.Error(e))
 			case <-scheduler.end:
-				log.Println("NormalServerTestRunner.Run1 terminated!")
+				logger.Info("NormalServerTestRunner.Run1 terminated!")
 				return
 			}
 		}
@@ -74,12 +114,14 @@ var SaucrServerTestRunner = TestRunner{
 			}
 		}()
 
+		logger, _ := GetSchedulerLogger()
+
 		for {
 			select {
 			case e := <-scheduler.err:
-				log.Fatal(e)
+				logger.Fatal("receive error from scheduler", zap.Error(e))
 			case <-scheduler.end:
-				log.Println("SaucrServerTestRunner.Run3 terminated!")
+				logger.Info("SaucrServerTestRunner.Run3 terminated!")
 				return
 			}
 		}
@@ -109,12 +151,14 @@ var SaucrServerTestRunner = TestRunner{
 			}
 		}()
 
+		logger, _ := GetSchedulerLogger()
+
 		for {
 			select {
 			case e := <-scheduler.err:
-				log.Fatal(e)
+				logger.Fatal("receive error from scheduler", zap.Error(e))
 			case <-scheduler.end:
-				log.Println("SaucrServerTestRunner.Run5 terminated!")
+				logger.Info("SaucrServerTestRunner.Run5 terminated!")
 				return
 			}
 		}
@@ -144,12 +188,14 @@ var SaucrServerTestRunner = TestRunner{
 			}
 		}()
 
+		logger, _ := GetSchedulerLogger()
+
 		for {
 			select {
 			case e := <-scheduler.err:
-				log.Fatal(e)
+				logger.Fatal("receive error from scheduler", zap.Error(e))
 			case <-scheduler.end:
-				log.Println("SaucrServerTestRunner.Run7 terminated!")
+				logger.Info("SaucrServerTestRunner.Run7 terminated!")
 				return
 			}
 		}

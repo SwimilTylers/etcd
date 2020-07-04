@@ -204,7 +204,16 @@ func (b *SchedulerBuilder) idleInternal(after time.Duration, shouldIde []bool) {
 }
 
 func (b *SchedulerBuilder) syncInternal(after time.Duration, syncC <-chan struct{}, count int, shouldSync []bool) {
+	panic("not supported yet")
+}
 
+func GetSchedulerLogger() (*zap.Logger, error) {
+	config := zap.NewProductionConfig()
+	config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
+	config.ErrorOutputPaths = append(config.ErrorOutputPaths, GlobalRunnerConfigs["scheduler-log-file"].(string))
+	config.OutputPaths = append(config.OutputPaths, GlobalRunnerConfigs["scheduler-log-file"].(string))
+
+	return config.Build()
 }
 
 /*

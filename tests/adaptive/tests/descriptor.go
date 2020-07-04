@@ -68,6 +68,10 @@ func (c *CDescriptor) GetClientPorts() []string {
 	return cps
 }
 
+func (c *CDescriptor) GetMemberNum() int {
+	return len(c.members)
+}
+
 func GetUrl(s string) *url.URL {
 	u, _ := url.Parse(s)
 	return u
@@ -133,6 +137,23 @@ func MakeUniformCluster(size int, host string) *CDescriptor {
 			fmt.Sprintf("srv%d", i),
 			GetUrl(fmt.Sprintf("%s:1%d379", host, i+1)),
 			GetUrl(fmt.Sprintf("%s:1%d380", host, i+1)),
+		}
+	}
+	return cluster
+}
+
+func MakeDistinctCluster(hosts []string) *CDescriptor {
+	cluster := &CDescriptor{
+		token:  fmt.Sprintf("test-uniform-%d", len(hosts)),
+		lg:     "zap",
+		output: embed.StdErrLogOutput,
+	}
+	cluster.members = make([]*SDescriptor, len(hosts))
+	for i := 0; i < len(hosts); i++ {
+		cluster.members[i] = &SDescriptor{
+			fmt.Sprintf("srv%d", i),
+			GetUrl(fmt.Sprintf("%s:1%d379", hosts[i], i+1)),
+			GetUrl(fmt.Sprintf("%s:1%d380", hosts[i], i+1)),
 		}
 	}
 	return cluster
