@@ -19,7 +19,7 @@ func main() {
 	// change Global Args
 	tests.GlobalRunnerConfigs["remain-duration"] = 5 * time.Minute
 	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-	benchArgs[1]["total"] = "400000"
+	benchArgs[1]["total"] = "800000"
 	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 	// clusters
@@ -27,7 +27,7 @@ func main() {
 		"http://192.168.198.137",
 		"http://192.168.198.136",
 	}
-	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.137"
+	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.136"
 
 	if err := utils.RemoveAllSrvInfo(); err != nil {
 		fmt.Println("cannot remove all srv info: ", err)
@@ -50,7 +50,8 @@ func main() {
 	hosts, selected = GetRemoteCluster(size)
 	tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeDistinctCluster(hosts)
 
-	go utils.CreateBenchShell(size)
+	// go utils.CreateBenchShell(size)
+	go utils.CreateBenchVerifyShell(size)
 
 	tester := tests.NormalServerTestRunner
 	// tester := tests.SaucrServerTestRunner

@@ -28,11 +28,25 @@ func InitClientConfig() {
 		return builder.String()
 	}
 	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --sample put --key-size=8 --sequential-keys --total=100000 --val-size=256"
+
+	GlobalClientConfig["output-format"] = "run_bench_%size.sh"
 }
 
 func UseBenchTool() {
 	GlobalClientConfig["bench"] = "tools/benchtool/benchtool"
 	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --database=random[key-size=8,val-size=256] --sample put --total=100000"
+}
+
+func CreateBenchVerifyShell(size int) {
+	GlobalClientConfig["bench-arg-format"] = strings.ReplaceAll(GlobalClientConfig["bench-arg-format"].(string), "put", "verify")
+	GlobalClientConfig["output-format"] = "run_bench_verify_%size.sh"
+
+	CreateBenchShell(size)
+
+	GlobalClientConfig["bench-arg-format"] = strings.ReplaceAll(GlobalClientConfig["bench-arg-format"].(string), "verify", "put")
+	GlobalClientConfig["output-format"] = "run_bench_%size.sh"
+
+	CreateBenchShell(size)
 }
 
 func CreateBenchShell(size int) {
@@ -44,7 +58,8 @@ func CreateBenchShell(size int) {
 		benchCmd = fmt.Sprintf("exec %s", GlobalClientConfig["bench"])
 	}
 
-	bench, _ := os.Create(fmt.Sprintf("run_bench_%d.sh", size))
+	format := GlobalClientConfig["output-format"]
+	bench, _ := os.Create(strings.ReplaceAll(format.(string), "%size", strconv.Itoa(size)))
 	defer bench.Close()
 
 	srv := GlobalClientConfig["bench-srv-urls-generator"].(func([]string) string)(
