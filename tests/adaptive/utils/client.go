@@ -34,7 +34,7 @@ func InitClientConfig() {
 
 func UseBenchTool() {
 	GlobalClientConfig["bench"] = "tools/benchtool/benchtool"
-	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --database=random[key-size=8,val-size=256] --sample put --total=100000"
+	GlobalClientConfig["bench-arg-format"] = "--endpoints=%edpts --clients=30 --conns=%cns --database=random[key-size=8,val-size=256,force-single=true] --sample put --total=100000"
 }
 
 func CreateBenchVerifyShell(size int) {
@@ -71,4 +71,5 @@ func CreateBenchShell(size int) {
 	args = strings.ReplaceAll(args, "%cns", strconv.Itoa(size))
 
 	_, _ = bench.WriteString(fmt.Sprintf("%s\n\n%s %s", GlobalClientConfig["shell"], benchCmd, args))
+	_ = bench.Sync()
 }
