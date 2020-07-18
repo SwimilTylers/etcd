@@ -19,42 +19,32 @@ func main() {
 	// change Global Args
 	tests.GlobalRunnerConfigs["remain-duration"] = 5 * time.Minute
 	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-	benchArgs[1]["total"] = "800000"
+	benchArgs[1]["total"] = "250000"
+	benchArgs[0]["clients"] = "12"
 	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 	// clusters
 	tests.GlobalRunnerConfigs["available-machine"] = []string{
+		"http://192.168.198.139",
+		"http://192.168.198.138",
 		"http://192.168.198.137",
-		"http://192.168.198.136",
 	}
-	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.136"
+	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.137"
 
-	if err := utils.RemoveAllSrvInfo(); err != nil {
-		fmt.Println("cannot remove all srv info: ", err)
-		return
-	} else {
-		fmt.Println("all past srv info has been removed")
-	}
+	// if RemoveHistory() != nil {return}
 
-	if err := utils.RemoveAllSrvLog(); err != nil {
-		fmt.Println("cannot remove all srv log: ", err)
-		return
-	} else {
-		fmt.Println("all past srv log has been removed")
-	}
-
-	var size = 5
-	var hosts []string
+	var size = 7
+	// var hosts []string
 	var selected []int
 	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
-	hosts, selected = GetRemoteCluster(size)
-	tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeDistinctCluster(hosts)
+	// hosts, selected = GetRemoteCluster(size)
+	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeDistinctCluster(hosts)
 
 	// go utils.CreateBenchShell(size)
 	go utils.CreateBenchVerifyShell(size)
 
-	tester := tests.NormalServerTestRunner
-	// tester := tests.SaucrServerTestRunner
+	// tester := tests.NormalServerTestRunner
+	tester := tests.SaucrServerTestRunner
 
 	// sch := MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
 	// sch := tests.DoNothing
@@ -65,7 +55,7 @@ func main() {
 
 	// tests.NormalServerTestRunner.Run7(tests.DoNothing)
 	// tests.SaucrServerTestRunner.Run5(tests.DoNothing)
-	Pause("ready for validation")
+	Pause(GetTesterRunnerInfo(tester, size, selected))
 
 	Run(tester, size, selected...)(tests.DoNothing)
 }
@@ -99,6 +89,24 @@ func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, 
 	default:
 		return tests.DoNothing
 	}
+}
+
+func RemoveHistory() error {
+	if err := utils.RemoveAllSrvInfo(); err != nil {
+		fmt.Println("cannot remove all srv info: ", err)
+		return err
+	} else {
+		fmt.Println("all past srv info has been removed")
+	}
+
+	if err := utils.RemoveAllSrvLog(); err != nil {
+		fmt.Println("cannot remove all srv log: ", err)
+		return err
+	} else {
+		fmt.Println("all past srv log has been removed")
+	}
+
+	return nil
 }
 
 func Run(runner tests.TestRunner, size int, selected ...int) func(scheduler tests.Scheduler) {
@@ -145,4 +153,12 @@ func GetRemoteCluster(size int) ([]string, []int) {
 		}
 	}
 	return hosts, selected
+}
+
+func GetTesterRunnerInfo(tester tests.TestRunner, size int, selected []int) string {
+	if selected != nil {
+		return fmt.Sprintf("ready for server instantiation [tester=%s,size=%d,selected=%v]", tester.Name, size, selected)
+	} else {
+		return fmt.Sprintf("ready for server instantiation [tester=%s,size=%d,selected=all]", tester.Name, size)
+	}
 }

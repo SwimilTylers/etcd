@@ -5,6 +5,7 @@ import (
 )
 
 type TestRunner struct {
+	Name    string
 	Start   func(c *CDescriptor, idx int) (*embed.Etcd, error)
 	Restart func(c *CDescriptor, idx int) (*embed.Etcd, error)
 	RunX    func(selected []int, s Scheduler)

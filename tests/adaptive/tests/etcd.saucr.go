@@ -19,6 +19,7 @@ func restartOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig
 }
 
 var SaucrServerTestRunner = TestRunner{
+	Name: "SaucrServerTestRunner",
 	Start: func(c *CDescriptor, idx int) (*embed.Etcd, error) {
 		return startOneSaucr(c, idx, GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig))
 	},

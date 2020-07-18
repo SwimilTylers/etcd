@@ -17,6 +17,7 @@ func restartOneNormal(cluster *CDescriptor, idx int) (*embed.Etcd, error) {
 }
 
 var NormalServerTestRunner = TestRunner{
+	Name:    "NormalServerTesterRunner",
 	Start:   startOneNormal,
 	Restart: restartOneNormal,
 	RunX: func(selected []int, scheduler Scheduler) {
