@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	RandDataOptMode      = "mode"
-	RandDataOptKeySize   = "key-size"
-	RandDataOptValueSize = "val-size"
+	RandDataOptMode              = "mode"
+	RandDataOptKeySize           = "key-size"
+	RandDataOptValueSize         = "val-size"
+	RandDataOptForceSingleWorker = "force-single"
 )
 
 type RDRecords struct {
@@ -65,7 +66,7 @@ func (rdr *RDRecords) Unmarshal(b []byte) error {
 
 	for i := 0; i < len(rdr.values); i++ {
 		rdr.values[i] = make([]byte, size)
-		if n, err := buffer.Read(rdr.values[i]); err == nil {
+		if n, err := buffer.Read(rdr.values[i]); err != nil {
 			return err
 		} else if int64(n) != size {
 			return errors.New("not aligned")
@@ -83,6 +84,8 @@ func (rdr *RDRecords) Unmarshal(b []byte) error {
 type SequentialRandomData struct {
 	*parallelData
 
+	forceSingleWorker bool
+
 	wNum int
 
 	keySize   int
@@ -97,7 +100,11 @@ func (sqd *SequentialRandomData) Init(dataSize int, workerNum int, bufferSize in
 	sqd.values = make([][]byte, dataSize)
 	sqd.sent = make([]bool, dataSize)
 
-	sqd.wNum = workerNum
+	if sqd.forceSingleWorker {
+		sqd.wNum = 1
+	} else {
+		sqd.wNum = workerNum
+	}
 
 	sqd.raWorker = func(wIdx int) {
 		v := newRandValue(sqd.valueSize)
@@ -116,15 +123,20 @@ func (sqd *SequentialRandomData) Init(dataSize int, workerNum int, bufferSize in
 			k, _ := binary.Varint(ack.Op.KeyBytes())
 			sqd.sent[k] = bytes.Equal(ack.Op.ValueBytes(), sqd.values[k])
 		}
+		sqd.done <- struct{}{}
 	}
 
-	sqd.parallelData.Init(dataSize, workerNum, bufferSize)
+	sqd.parallelData.Init(dataSize, sqd.wNum, bufferSize)
 }
 
 func (sqd *SequentialRandomData) InitValidate(dataSize, workerNum, bufferSize int) {
 	sqd.checked = make([]bool, dataSize)
 
-	sqd.wNum = workerNum
+	if sqd.forceSingleWorker {
+		sqd.wNum = 1
+	} else {
+		sqd.wNum = workerNum
+	}
 
 	sqd.rcWorker = func(wIdx int) {
 		gap := sqd.wNum
@@ -143,6 +155,7 @@ func (sqd *SequentialRandomData) InitValidate(dataSize, workerNum, bufferSize in
 				sqd.checked[k] = bytes.Equal(kv.Value, sqd.values[k])
 			}
 		}
+		sqd.done <- struct{}{}
 	}
 
 	sqd.conclude = func() string {
@@ -169,7 +182,32 @@ func (sqd *SequentialRandomData) InitValidate(dataSize, workerNum, bufferSize in
 		return fmt.Sprintf("Database checking:\ntotal: \t%d\ndrop: \t%d\nweird: \t%d\nlost: \t%d\nsucc: \t%d", len(sqd.values), drop, weird, lost, succ)
 	}
 
-	sqd.parallelData.InitValidate(dataSize, workerNum, bufferSize)
+	sqd.parallelData.InitValidate(dataSize, sqd.wNum, bufferSize)
+}
+
+func (sqd *SequentialRandomData) Requests() <-chan clientv3.Op {
+	return sqd.requests
+}
+
+func (sqd *SequentialRandomData) Acknowledge(op clientv3.Op, resp clientv3.OpResponse) {
+	if sqd.forceSingleWorker {
+		k, _ := binary.Varint(op.KeyBytes())
+		sqd.sent[k] = bytes.Equal(op.ValueBytes(), sqd.values[k])
+	} else {
+		sqd.parallelData.Acknowledge(op, resp)
+	}
+}
+
+func (sqd *SequentialRandomData) Confirm(resp clientv3.OpResponse) {
+	if sqd.forceSingleWorker {
+		kvs := resp.Get().Kvs
+		for _, kv := range kvs {
+			k, _ := binary.Varint(kv.Key)
+			sqd.checked[k] = bytes.Equal(kv.Value, sqd.values[k])
+		}
+	} else {
+		sqd.Confirm(resp)
+	}
 }
 
 func (sqd *SequentialRandomData) Load(file string) error {
@@ -239,6 +277,8 @@ func ParseRandomDataOptions(opts string) map[string]interface{} {
 			ret[RandDataOptKeySize], _ = strconv.Atoi(kvs[1])
 		case RandDataOptValueSize:
 			ret[RandDataOptValueSize], _ = strconv.Atoi(kvs[1])
+		case RandDataOptForceSingleWorker:
+			ret[RandDataOptForceSingleWorker], _ = strconv.ParseBool(kvs[1])
 		}
 	}
 
@@ -251,6 +291,7 @@ func GetDefaultRandomDataOptions() map[string]interface{} {
 	ret[RandDataOptMode] = "sequential"
 	ret[RandDataOptKeySize] = 8
 	ret[RandDataOptValueSize] = 8
+	ret[RandDataOptForceSingleWorker] = false
 
 	return ret
 }

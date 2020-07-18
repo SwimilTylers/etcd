@@ -16,19 +16,18 @@ type BenchData interface {
 	Requests() <-chan clientv3.Op
 
 	// After receiving replies from servers, clients should mark the sent Ops through Acknowledge channel
-	Acknowledge() chan<- struct {
-		clientv3.Op
-		clientv3.OpResponse
-	}
+	Acknowledge(op clientv3.Op, resp clientv3.OpResponse)
 
 	// After reading kvs from servers, clients should mark the received Ops through Confirm channel
-	Confirm() chan<- clientv3.OpResponse
+	Confirm(resp clientv3.OpResponse)
 
 	// Conclusions made by BenchData will be sent through Results channel
 	Results() string
 
 	Load(file string) error
 	Store(file string) error
+
+	Close() error
 }
 
 func GetBenchDataFromString(desc string) BenchData {
@@ -36,9 +35,10 @@ func GetBenchDataFromString(desc string) BenchData {
 		opts := ParseRandomDataOptions(strings.TrimPrefix(desc, "random"))
 		if opts[RandDataOptMode] == "sequential" {
 			return &SequentialRandomData{
-				parallelData: GetParallelDataCore(),
-				keySize:      opts[RandDataOptKeySize].(int),
-				valueSize:    opts[RandDataOptValueSize].(int),
+				parallelData:      GetParallelDataCore(),
+				keySize:           opts[RandDataOptKeySize].(int),
+				valueSize:         opts[RandDataOptValueSize].(int),
+				forceSingleWorker: opts[RandDataOptForceSingleWorker].(bool),
 			}
 		} else {
 			return nil

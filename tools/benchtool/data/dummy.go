@@ -38,16 +38,9 @@ func (d *dummyData) Requests() <-chan clientv3.Op {
 	return d.out
 }
 
-func (d *dummyData) Acknowledge() chan<- struct {
-	clientv3.Op
-	clientv3.OpResponse
-} {
-	return d.ain
-}
+func (d *dummyData) Acknowledge(clientv3.Op, clientv3.OpResponse) {}
 
-func (d *dummyData) Confirm() chan<- clientv3.OpResponse {
-	return d.cin
-}
+func (d *dummyData) Confirm(clientv3.OpResponse) {}
 
 func (d *dummyData) InitValidate(int, int, int) {}
 
@@ -60,5 +53,9 @@ func (d *dummyData) Load(file string) error {
 }
 
 func (d *dummyData) Store(file string) error {
+	return nil
+}
+
+func (d *dummyData) Close() error {
 	return nil
 }

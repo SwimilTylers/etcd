@@ -28,6 +28,9 @@ type parallelData struct {
 	infoAll  string
 	infoWait sync.WaitGroup
 	conclude func() string
+
+	closeCount int
+	done       chan struct{}
 }
 
 func (p *parallelData) Init(dataSize int, workerNum int, bufferSize int) {
@@ -36,6 +39,8 @@ func (p *parallelData) Init(dataSize int, workerNum int, bufferSize int) {
 		clientv3.Op
 		clientv3.OpResponse
 	}, bufferSize)
+	p.done = make(chan struct{})
+	p.closeCount = workerNum
 
 	for i := 0; i < workerNum; i++ {
 		go func(wIdx int) {
@@ -57,6 +62,8 @@ func (p *parallelData) Init(dataSize int, workerNum int, bufferSize int) {
 func (p *parallelData) InitValidate(dataSize int, workerNum int, bufferSize int) {
 	p.requests = make(chan clientv3.Op, bufferSize)
 	p.confirm = make(chan clientv3.OpResponse, bufferSize)
+	p.done = make(chan struct{})
+	p.closeCount = workerNum
 
 	for i := 0; i < workerNum; i++ {
 		go func(wIdx int) {
@@ -96,15 +103,15 @@ func (p *parallelData) Requests() <-chan clientv3.Op {
 	return p.requests
 }
 
-func (p *parallelData) Acknowledge() chan<- struct {
-	clientv3.Op
-	clientv3.OpResponse
-} {
-	return p.ack
+func (p *parallelData) Acknowledge(op clientv3.Op, resp clientv3.OpResponse) {
+	p.ack <- struct {
+		clientv3.Op
+		clientv3.OpResponse
+	}{op, resp}
 }
 
-func (p *parallelData) Confirm() chan<- clientv3.OpResponse {
-	return p.confirm
+func (p *parallelData) Confirm(resp clientv3.OpResponse) {
+	p.confirm <- resp
 }
 
 func (p *parallelData) Results() string {
@@ -122,6 +129,25 @@ func (p *parallelData) Load(file string) error {
 }
 
 func (p *parallelData) Store(file string) error {
+	return nil
+}
+
+func (p *parallelData) Close() error {
+	if p.ack != nil {
+		close(p.ack)
+	}
+
+	if p.confirm != nil {
+		close(p.confirm)
+	}
+
+	for _ = range p.done {
+		p.closeCount--
+		if p.closeCount == 0 {
+			break
+		}
+	}
+
 	return nil
 }
 

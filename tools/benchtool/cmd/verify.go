@@ -41,7 +41,7 @@ func verifyFunc(cmd *cobra.Command, args []string) {
 	database.InitValidate(verifyTotal, int(totalConns), int(totalClients))
 	wg := runClients(clients,
 		database.Requests(),
-		func(op v3.Op, opResponse v3.OpResponse) { database.Confirm() <- opResponse },
+		func(op v3.Op, opResponse v3.OpResponse) { database.Confirm(opResponse) },
 		nil,
 		nil,
 	)
@@ -61,5 +61,6 @@ func verifyFunc(cmd *cobra.Command, args []string) {
 	}
 
 	bar.Finish()
+	_ = database.Close()
 	fmt.Println(database.Results())
 }

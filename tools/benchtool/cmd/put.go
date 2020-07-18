@@ -76,10 +76,7 @@ func putFunc(cmd *cobra.Command, args []string) {
 	wg := runClients(clients,
 		database.Requests(),
 		func(op v3.Op, opResponse v3.OpResponse) {
-			database.Acknowledge() <- struct {
-				v3.Op
-				v3.OpResponse
-			}{op, opResponse}
+			database.Acknowledge(op, opResponse)
 		},
 		rate.NewLimiter(rate.Limit(putRate), 1),
 		r,
@@ -113,6 +110,7 @@ func putFunc(cmd *cobra.Command, args []string) {
 	close(r.Results())
 	fmt.Println(<-rc)
 
+	_ = database.Close()
 	_ = database.Store(vFile)
 }
 
