@@ -5,6 +5,7 @@ import (
 	"go.etcd.io/etcd/clientv3"
 	"strings"
 	"sync"
+	"time"
 )
 
 type parallelData struct {
@@ -53,6 +54,7 @@ func (p *parallelData) Init(dataSize int, workerNum int, bufferSize int) {
 	}
 
 	go func() {
+		time.Sleep(50 * time.Millisecond)
 		p.iWg.Wait()
 		close(p.requests)
 	}()
@@ -76,6 +78,7 @@ func (p *parallelData) InitValidate(dataSize int, workerNum int, bufferSize int)
 	}
 
 	go func() {
+		time.Sleep(50 * time.Millisecond)
 		p.cWg.Wait()
 		close(p.requests)
 	}()
