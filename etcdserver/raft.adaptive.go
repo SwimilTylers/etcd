@@ -1,12 +1,14 @@
 package etcdserver
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"go.etcd.io/etcd/adaptive"
 	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
+	"os"
 	"sync"
 	"time"
 )
@@ -50,6 +52,7 @@ type SaucrRaftNode struct {
 // to modify the fields after it has been started.
 func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 	internalTimeout := time.Second
+	debugTicks := []uint64{0, 0}
 
 	go func() {
 		defer srn.onStop()
@@ -63,6 +66,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 			case rd := <-srn.Ready():
 				var pMonitorCfg *adaptive.PerceptibleConfig
 				var pManagerStg *adaptive.PersistentStrategy
+				debugTicks[1]++
 
 				if rd.SoftState != nil {
 					newLeader := rd.SoftState.Lead != raft.None && rh.getLead() != rd.SoftState.Lead
@@ -199,11 +203,14 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 						}
 					} else {
 						if srn.lg != nil {
+							debugTicks[0] = debugTicks[1] - debugTicks[0]
 							srn.lg.Info("transform the mode of PManager",
 								zap.Bool("is-leader", isLead),
 								zap.Bool("is-follower", isFollower),
 								zap.Bool("to-fsync", pManagerStg.Fsync),
+								zap.Uint64("elapse-ticks", debugTicks[0]),
 							)
+							debugTicks[0] = debugTicks[1]
 						} else {
 							plog.Info("transform the mode of PManager")
 						}
@@ -402,12 +409,12 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 	}
 }
 
-func (srn *SaucrRaftNode) EnableSyncMode(itv time.Duration) {
+func (srn *SaucrRaftNode) EnableModeSynchronization(itv time.Duration) {
 	srn.syncMode = true
 	srn.syncModeItv = itv
 }
 
-func (srn *SaucrRaftNode) DisableSyncMode() {
+func (srn *SaucrRaftNode) DisableModeSynchronization() {
 	srn.syncMode = false
 }
 
@@ -511,6 +518,98 @@ func (srn *SaucrRaftNode) GetExactlyAndDropMsgSaucr(term uint64) (raftpb.Message
 		srn.msgSaucrEmpty = true
 		return raftpb.Message{}, false
 	}
+}
+
+type SaucrModeDamper struct {
+	window    []bool
+	winSize   int
+	ptr       int
+	fluctuate int
+	lastMode  SaucrMode
+}
+
+func (damper *SaucrModeDamper) Current(mode SaucrMode) {
+	damper.ptr = (damper.ptr + 1) % damper.winSize
+	damper.window[damper.ptr] = mode != damper.lastMode
+	damper.lastMode = mode
+}
+
+func (damper *SaucrModeDamper) IsFluctuate() bool {
+	var count int
+	for _, changed := range damper.window {
+		if changed {
+			count++
+		}
+	}
+	return count >= damper.fluctuate
+}
+
+type SaucrModeRecorder struct {
+	changes []struct {
+		SaucrMode
+		time.Time
+		ticks uint64
+	}
+	idx      int
+	lastMode SaucrMode
+	tick     uint64
+}
+
+func (recorder *SaucrModeRecorder) expand() {
+	buf := make([]struct {
+		SaucrMode
+		time.Time
+		ticks uint64
+	}, recorder.idx, recorder.idx*2)
+	copy(buf, recorder.changes)
+	recorder.changes = buf
+}
+
+func (recorder *SaucrModeRecorder) Current(mode SaucrMode) {
+	recorder.tick++
+	if mode != recorder.lastMode {
+		entry := struct {
+			SaucrMode
+			time.Time
+			ticks uint64
+		}{mode, time.Now(), recorder.tick}
+		recorder.idx++
+		if recorder.idx == cap(recorder.changes) {
+			recorder.expand()
+		}
+		recorder.changes[recorder.idx] = entry
+		recorder.changes = recorder.changes[:recorder.idx+1]
+	}
+}
+
+func (recorder *SaucrModeRecorder) Dump(file string) {
+	f, _ := os.Create(file)
+	defer f.Close()
+
+	to := bufio.NewWriter(f)
+	to.WriteString("Mode\tTick Displacement\tTime\n")
+	lastTick := recorder.changes[0].ticks
+
+	for _, entry := range recorder.changes {
+		tick := entry.ticks
+		to.WriteString(fmt.Sprintf("%s\t+%8d\t%v", entry.SaucrMode.String(), tick-lastTick, entry.Time))
+		lastTick = tick
+	}
+
+	to.Flush()
+}
+
+func NewSaucrModeDamper(sConfig *SaucrConfig) (*SaucrModeDamper, error) {
+	if sConfig.DamperWindowSize < sConfig.DamperFluctuate {
+		return nil, errors.New("illegal Damper Configuration")
+	}
+
+	damper := &SaucrModeDamper{window: make([]bool, sConfig.DamperWindowSize), winSize: sConfig.DamperWindowSize, fluctuate: sConfig.DamperFluctuate}
+	damper.window[0] = true
+	for i := 1; i < len(damper.window); i++ {
+		damper.window[i] = false
+	}
+	return damper, nil
 }
 
 func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pManagerStg *adaptive.PersistentStrategy, sConfig *SaucrConfig) *SaucrRaftNode {

@@ -151,6 +151,50 @@ func (d *DummyHbCounter) Report() bool {
 
 func (d *DummyHbCounter) Init(positive bool) {}
 
+type BipolarHbCounter struct {
+	critical bool
+	counter  int
+
+	bipolar [2]int
+}
+
+func (bhc *BipolarHbCounter) Positive() {
+	if !bhc.critical {
+		// if not critical, bhc will reset to bipolar[1]
+		bhc.counter = bhc.bipolar[1]
+	} else {
+		// otherwise, bhc will count down
+		bhc.counter--
+	}
+}
+
+func (bhc *BipolarHbCounter) Negative() {
+	if bhc.critical && bhc.counter < bhc.bipolar[0] {
+		// if is critical, bhc will increment counter with upper bound of bipolar[0]
+		bhc.counter++
+	} else {
+		// otherwise, bhc will count down
+		bhc.counter--
+	}
+}
+
+func (bhc *BipolarHbCounter) Report() bool {
+	if bhc.counter <= 0 {
+		bhc.Init(bhc.critical)
+	}
+	return !bhc.critical
+}
+
+func (bhc *BipolarHbCounter) Init(positive bool) {
+	if positive {
+		bhc.critical = false
+		bhc.counter = bhc.bipolar[1]
+	} else {
+		bhc.critical = true
+		bhc.counter = bhc.bipolar[0]
+	}
+}
+
 func NaiveHbCounterFactory() HeartbeatCounter {
 	return &CustomizedBucketCounter{
 		counter: 0,
@@ -178,4 +222,14 @@ func AlwaysConnectHbCounterFactory() HeartbeatCounter {
 
 func AlwaysDisconnectHbCounterFactory() HeartbeatCounter {
 	return &DummyHbCounter{false}
+}
+
+func BipolarHbCounterFactoryGenerator(bPlus int, bMinus int) func() HeartbeatCounter {
+	return func() HeartbeatCounter {
+		return &BipolarHbCounter{
+			critical: true,
+			counter:  bMinus,
+			bipolar:  [2]int{bMinus, bPlus},
+		}
+	}
 }

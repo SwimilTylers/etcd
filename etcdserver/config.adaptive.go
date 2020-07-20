@@ -14,6 +14,9 @@ type SaucrConfig struct {
 
 	SaucrModeSync bool
 	SaucrModeItv  time.Duration
+
+	DamperWindowSize int
+	DamperFluctuate  int
 }
 
 var DefaultSaucrConfig = &SaucrConfig{
