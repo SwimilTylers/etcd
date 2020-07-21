@@ -37,6 +37,11 @@ type Perceptible interface {
 	// IsCritical tells whether data persistence is compulsory
 	// This involves the adaptive coordination mechanism
 	IsCritical() bool
+
+	// TryGetActivate provides currently activated Perceptible
+	// If is already activated, it will return itself
+	// Otherwise, it will generate a activated instance. If activation failed, return itself
+	TryGetActivate() Perceptible
 }
 
 func SetPerceptibleCritical(p Perceptible, critical bool) error {

@@ -614,6 +614,14 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 
 	// todo: check if a wrapper is necessary
 	srv.srn = NewSaucrRaftNode(&(srv.r), pMonitorCfg, pManagerStg, sCfg)
+	srv.srn.clusterUpdater = func() []uint64 {
+		mIds := srv.cluster.MemberIDs()
+		peers := make([]uint64, len(mIds))
+		for i := 0; i < len(mIds); i++ {
+			peers[i] = uint64(mIds[i])
+		}
+		return peers
+	}
 	srv.r.storage = srv.srn.PManager
 
 	serverID.With(prometheus.Labels{"server_id": id.String()}).Set(1)

@@ -141,6 +141,10 @@ func (sm *SaucrMonitor) IsCritical() bool {
 	return sm.evaluate()
 }
 
+func (sm *SaucrMonitor) TryGetActivate() Perceptible {
+	return sm
+}
+
 func (sm *SaucrMonitor) refreshStateWithOption(state raft.StateType, isInitCritical bool) error {
 	sm.state = state
 
@@ -241,5 +245,14 @@ func NewSaucrMonitor(logger *zap.Logger, hbCounterFactory func() HeartbeatCounte
 		return nil, err
 	} else {
 		return ret, nil
+	}
+}
+
+func GetSaucrMonitorActivation(hbCounterFactory func() HeartbeatCounter) func(lg *zap.Logger, config *PerceptibleConfig) (Perceptible, error) {
+	return func(lg *zap.Logger, config *PerceptibleConfig) (Perceptible, error) {
+		if config.Peers == nil || len(config.Peers) < 3 {
+			return nil, errors.New("cluster is not prepared yet")
+		}
+		return NewSaucrMonitor(lg, hbCounterFactory, config)
 	}
 }

@@ -16,9 +16,11 @@ import (
 type SaucrRaftNode struct {
 	*raftNode
 
-	peers []uint64
-	self  uint64
-	term  uint64
+	clusterUpdater func() []uint64
+	peers          []uint64
+	self           uint64
+
+	term uint64
 
 	// PeerMonitor perceives the connectivity of peers and decides
 	// whether to switch between fast-but-not-reliable mode and
@@ -119,7 +121,6 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 						if srn.lg != nil {
 							srn.lg.Info(
 								"transform the mode of PMonitor",
-								zap.Error(err),
 								zap.Bool("is-leader", isLead),
 								zap.Bool("is-follower", isFollower),
 								zap.String("cfg", fmt.Sprintf("%+v", pMonitorCfg)),
@@ -163,6 +164,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 				// writing to their disks.
 				// For more details, check raft thesis 10.2.1
 				if isLead {
+					srn.PeerMonitor = srn.PeerMonitor.TryGetActivate()
 					// gofail: var raftBeforeLeaderSend struct{}
 					srn.transport.Send(srn.processMessages(rd.Messages))
 				}
@@ -423,7 +425,13 @@ func (srn *SaucrRaftNode) DisableModeSynchronization() {
 // This function only updates PerceptibleConfig rather than Perceptible per se.
 // To be mentioned, $3(leader) should get from rh.getLead, in consideration for atomicity
 func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, state raft.StateType, leader uint64) *adaptive.PerceptibleConfig {
-	if state == raft.StateLeader || state == raft.StateFollower {
+	if state == raft.StateLeader {
+		srn.peers = srn.clusterUpdater()
+
+		cfg.State = state
+		cfg.Leader = leader
+		cfg.Peers = srn.peers
+	} else if state == raft.StateFollower {
 		cfg.State = state
 		cfg.Leader = leader
 	} else {
@@ -631,12 +639,12 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 		if r.lg != nil {
 			r.lg.Info("Saucr requires a cluster of at least 3 peers",
 				zap.Int("peer-len", len(pMonitorCfg.Peers)),
-				zap.String("substitute", "DummyMonitor"),
+				zap.String("substitute", "InactivatedMonitor"),
 			)
 		} else {
-			plog.Infof("Saucr requires a cluster of at least 3 peers: using DummyMonitor")
+			plog.Infof("Saucr requires a cluster of at least 3 peers: using InactivatedMonitor")
 		}
-		monitor, err = adaptive.NewDummyMonitor(pMonitorCfg)
+		monitor, err = adaptive.NewInactivatedMonitor(r.lg, pMonitorCfg, adaptive.GetSaucrMonitorActivation(sConfig.HbcounterType))
 	} else {
 		monitor, err = adaptive.NewSaucrMonitor(r.lg, sConfig.HbcounterType, pMonitorCfg)
 	}
@@ -667,7 +675,7 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 
 	pManager := NewLocalCachedDisk(r.lg, r.storage, &adaptive.PersistentConfig{Strategy: pManagerStg})
 
-	return &SaucrRaftNode{
+	node := &SaucrRaftNode{
 		raftNode:    r,
 		peers:       pMonitorCfg.Peers,
 		self:        pMonitorCfg.Self,
@@ -677,4 +685,10 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 		syncMode:    sConfig.SaucrModeSync,
 		syncModeItv: sConfig.SaucrModeItv,
 	}
+
+	node.clusterUpdater = func() []uint64 {
+		return node.peers
+	}
+
+	return node
 }
