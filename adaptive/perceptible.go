@@ -39,9 +39,9 @@ type Perceptible interface {
 	IsCritical() bool
 
 	// TryGetActivate provides currently activated Perceptible
-	// If is already activated, it will return itself
-	// Otherwise, it will generate a activated instance. If activation failed, return itself
-	TryGetActivate() Perceptible
+	// If is already activated, it will return itself and true
+	// Otherwise, it will generate a activated instance and return true. If activation failed, return itself and false
+	TryGetActivate() (Perceptible, bool)
 }
 
 func SetPerceptibleCritical(p Perceptible, critical bool) error {

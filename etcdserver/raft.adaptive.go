@@ -61,6 +61,14 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 		isLead := false
 		isFollower := true
 
+		var isActivated bool
+		switch srn.PeerMonitor.(type) {
+		case *adaptive.InactivatedMonitor:
+			isActivated = false
+		default:
+			isActivated = true
+		}
+
 		for {
 			select {
 			case <-srn.ticker.C:
@@ -101,6 +109,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 				// update PMonitor with HardState
 				// Read etcd-notes-saucr-implementation.md for more information
 				pMonitorCfg = srn.updatePMonitorHard(pMonitorCfg, rd.HardState, isFollower)
+				pMonitorCfg = srn.updatePMonitorCluster(pMonitorCfg, isActivated, isLead)
 
 				// apply pMonitor's cfg changes
 
@@ -164,7 +173,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 				// writing to their disks.
 				// For more details, check raft thesis 10.2.1
 				if isLead {
-					srn.PeerMonitor = srn.PeerMonitor.TryGetActivate()
+					srn.PeerMonitor, isActivated = srn.PeerMonitor.TryGetActivate()
 					// gofail: var raftBeforeLeaderSend struct{}
 					srn.transport.Send(srn.processMessages(rd.Messages))
 				}
@@ -425,13 +434,7 @@ func (srn *SaucrRaftNode) DisableModeSynchronization() {
 // This function only updates PerceptibleConfig rather than Perceptible per se.
 // To be mentioned, $3(leader) should get from rh.getLead, in consideration for atomicity
 func (srn *SaucrRaftNode) updatePMonitorSoft(cfg *adaptive.PerceptibleConfig, state raft.StateType, leader uint64) *adaptive.PerceptibleConfig {
-	if state == raft.StateLeader {
-		srn.peers = srn.clusterUpdater()
-
-		cfg.State = state
-		cfg.Leader = leader
-		cfg.Peers = srn.peers
-	} else if state == raft.StateFollower {
+	if state == raft.StateFollower || state == raft.StateLeader {
 		cfg.State = state
 		cfg.Leader = leader
 	} else {
@@ -483,6 +486,24 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 	return cfg
 }
 
+// updatePMonitorCluster supports dynamic cluster update for leader's PMonitor, enabling the activation of InactivatedMonitor.
+//
+// This function only updates PerceptibleConfig rather than Perceptible per se.
+func (srn *SaucrRaftNode) updatePMonitorCluster(cfg *adaptive.PerceptibleConfig, isActivate bool, isLead bool) *adaptive.PerceptibleConfig {
+	if isActivate || !isLead {
+		return cfg
+	} else {
+		if cfg == nil {
+			cfg = srn.PeerMonitor.GetConfig()
+		}
+		srn.peers = srn.clusterUpdater()
+		cfg.Peers = srn.peers
+		return cfg
+	}
+}
+
+var switchCount = 0
+
 // updatePManagerMode behaves similar to the description in etcd-notes-saucr-implementation.md
 func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *adaptive.PersistentStrategy {
 	var critical bool
@@ -492,6 +513,11 @@ func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *a
 		critical = srn.PeerMonitor.IsCritical()
 	}
 	if srn.currentMode.IsConflictFromCritical(critical) {
+		switchCount++
+		if switchCount > 5 {
+			srn.lg.Info("check peer monitor", zap.String("status", srn.PeerMonitor.(*adaptive.SaucrMonitor).String()))
+		}
+
 		srn.currentMode = GetModeFromCritical(critical)
 		s := srn.PManager.GetStrategy()
 		s.Fsync = srn.currentMode.IsFsync()

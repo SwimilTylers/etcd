@@ -57,14 +57,14 @@ func (iam *InactivatedMonitor) IsCritical() bool {
 	return iam.mustCritical
 }
 
-func (iam *InactivatedMonitor) TryGetActivate() Perceptible {
+func (iam *InactivatedMonitor) TryGetActivate() (Perceptible, bool) {
 	if a, err := iam.activation(iam.logger, iam.GetConfig()); err != nil {
 		iam.logger.Error("failed to activate", zap.Error(err), zap.String("substitute", "InactivatedMonitor"))
 		// if error occurs, switch to sheltering mode
 		iam.mustCritical = true
-		return iam
+		return iam, false
 	} else {
-		return a
+		return a, true
 	}
 }
 

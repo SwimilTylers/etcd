@@ -96,14 +96,19 @@ var CautiousCounterCfg = &CustomizedBucketCounterConfig{
 }
 
 type CustomizedBucketCounter struct {
-	counter int
-	config  *CustomizedBucketCounterConfig
+	counter    int
+	lastResult bool
+
+	// if polarize=true, when lastResult != Report(), reset counter to xiPlus/xiMinus
+	polarize bool
+
+	config *CustomizedBucketCounterConfig
 }
 
 func (cbc *CustomizedBucketCounter) String() string {
-	return fmt.Sprintf("cbc=%d/%v,[%d,%d,%d,%d,%d,%d]",
-		cbc.counter, cbc.Report(), cbc.config.N, cbc.config.wPlus, cbc.config.wMinus,
-		cbc.config.xiPlus, cbc.config.xiMinus, cbc.config.t,
+	return fmt.Sprintf("cbc=%d,[%d,%d,%d,%d,%d,%d],last=%v,polarized=%v",
+		cbc.counter, cbc.config.N, cbc.config.wPlus, cbc.config.wMinus,
+		cbc.config.xiPlus, cbc.config.xiMinus, cbc.config.t, cbc.lastResult, cbc.polarize,
 	)
 }
 
@@ -126,14 +131,22 @@ func (cbc *CustomizedBucketCounter) Negative() {
 }
 
 func (cbc *CustomizedBucketCounter) Report() bool {
-	return cbc.counter > cbc.config.t
+	result := cbc.counter > cbc.config.t
+	if cbc.polarize && cbc.lastResult != result {
+		cbc.Init(result)
+	} else {
+		cbc.lastResult = result
+	}
+	return cbc.lastResult
 }
 
 func (cbc *CustomizedBucketCounter) Init(positive bool) {
 	if positive {
 		cbc.counter = cbc.config.xiPlus
+		cbc.lastResult = positive
 	} else {
 		cbc.counter = cbc.config.xiMinus
+		cbc.lastResult = positive
 	}
 }
 
@@ -197,22 +210,49 @@ func (bhc *BipolarHbCounter) Init(positive bool) {
 
 func NaiveHbCounterFactory() HeartbeatCounter {
 	return &CustomizedBucketCounter{
-		counter: 0,
-		config:  NaiveCounterCfg,
+		counter:  0,
+		config:   NaiveCounterCfg,
+		polarize: false,
 	}
 }
 
 func BoldHbCounterFactory() HeartbeatCounter {
 	return &CustomizedBucketCounter{
-		counter: 0,
-		config:  BoldCounterCfg,
+		counter:  0,
+		config:   BoldCounterCfg,
+		polarize: false,
 	}
 }
 
 func CautiousHbCounterFactory() HeartbeatCounter {
 	return &CustomizedBucketCounter{
-		counter: 0,
-		config:  CautiousCounterCfg,
+		counter:  0,
+		config:   CautiousCounterCfg,
+		polarize: false,
+	}
+}
+
+func PolarizedNaiveHbCounterFactory() HeartbeatCounter {
+	return &CustomizedBucketCounter{
+		counter:  0,
+		config:   NaiveCounterCfg,
+		polarize: true,
+	}
+}
+
+func PolarizedBoldHbCounterFactory() HeartbeatCounter {
+	return &CustomizedBucketCounter{
+		counter:  0,
+		config:   BoldCounterCfg,
+		polarize: true,
+	}
+}
+
+func PolarizedCautiousHbCounterFactory() HeartbeatCounter {
+	return &CustomizedBucketCounter{
+		counter:  0,
+		config:   CautiousCounterCfg,
+		polarize: true,
 	}
 }
 

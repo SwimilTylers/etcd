@@ -141,8 +141,8 @@ func (sm *SaucrMonitor) IsCritical() bool {
 	return sm.evaluate()
 }
 
-func (sm *SaucrMonitor) TryGetActivate() Perceptible {
-	return sm
+func (sm *SaucrMonitor) TryGetActivate() (Perceptible, bool) {
+	return sm, true
 }
 
 func (sm *SaucrMonitor) refreshStateWithOption(state raft.StateType, isInitCritical bool) error {
@@ -203,7 +203,7 @@ func (sm *SaucrMonitor) findIndex(key uint64) int {
 	return -1
 }
 
-func (sm *SaucrMonitor) countUnconnectedEscapeSelf() int {
+func (sm *SaucrMonitor) countUnconnectedExceptSelf() int {
 	counter := 0
 	for i, u := range sm.unconnected {
 		if u && sm.peers[i] != sm.self {
@@ -221,7 +221,7 @@ func (sm *SaucrMonitor) evaluate() bool {
 		// otherwise, monitor should decide on whether to be critical
 		if sm.state == raft.StateLeader {
 			// if it is a leader, check followers' connectivity
-			return sm.countUnconnectedEscapeSelf() >= sm.threshold
+			return sm.countUnconnectedExceptSelf() >= sm.threshold
 		} else if sm.state == raft.StateFollower {
 			// if it is a follower, check leader's validity
 

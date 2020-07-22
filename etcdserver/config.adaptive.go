@@ -22,7 +22,7 @@ type SaucrConfig struct {
 var DefaultSaucrConfig = &SaucrConfig{
 	MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
 	CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
-	HbcounterType:     adaptive.CautiousHbCounterFactory,
+	HbcounterType:     adaptive.PolarizedCautiousHbCounterFactory,
 	SaucrModeSync:     true,
 	SaucrModeItv:      1 * time.Second,
 }
