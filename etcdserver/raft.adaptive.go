@@ -69,6 +69,8 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 			isActivated = true
 		}
 
+		srn.syncModeLst = time.Now()
+
 		for {
 			select {
 			case <-srn.ticker.C:
@@ -345,7 +347,6 @@ func (srn *SaucrRaftNode) processMessages(ms []raftpb.Message) []raftpb.Message 
 			ms[i].To = 0
 		}
 		if ms[i].Type == raftpb.MsgHeartbeat {
-			srn.PeerMonitor.Perceive(ms[i].To, false)
 			ok, exceed := srn.td.Observe(ms[i].To)
 			if !ok {
 				// TODO: limit request rate.
@@ -380,6 +381,7 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 		count := 0
 		for _, peer := range srn.peers {
 			if peer != srn.self {
+				srn.PeerMonitor.Perceive(peer, false)
 				msg[count] = raftpb.Message{
 					Type: mType,
 					To:   peer,
@@ -393,7 +395,7 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 			srn.syncModeLst = time.Now()
 		}
 		return msg
-	} else if srn.syncMode && srn.syncModeItv >= time.Now().Sub(srn.syncModeLst) {
+	} else if srn.syncMode && srn.syncModeItv <= time.Now().Sub(srn.syncModeLst) {
 		var mType raftpb.MessageType
 		if srn.currentMode == SHELTERING {
 			mType = raftpb.MsgSaucrSheltering
@@ -404,6 +406,7 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 		count := 0
 		for _, peer := range srn.peers {
 			if peer != srn.self {
+				srn.PeerMonitor.Perceive(peer, false)
 				msg[count] = raftpb.Message{
 					Type: mType,
 					To:   peer,
@@ -455,6 +458,13 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 	}
 	if msg, ok := srn.GetExactlyAndDropMsgSaucr(srn.term); ok && isFollower {
 		if msg.Type == raftpb.MsgSaucrNormal {
+			srn.transport.Send([]raftpb.Message{{
+				Type: raftpb.MsgSaucrNormalResp,
+				To:   msg.From,
+				From: srn.self,
+				Term: srn.term,
+			}})
+
 			// if cfg is nil and current mode is consist with MsgType,
 			// that means no further update is necessary
 			if cfg == nil && srn.currentMode == NORMAL {
@@ -468,6 +478,13 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 			}
 			cfg.Critical = false
 		} else if msg.Type == raftpb.MsgSaucrSheltering {
+			srn.transport.Send([]raftpb.Message{{
+				Type: raftpb.MsgSaucrShelteringResp,
+				To:   msg.From,
+				From: srn.self,
+				Term: srn.term,
+			}})
+
 			// if cfg is nil and current mode is consist with MsgType,
 			// that means no further update is necessary
 			if cfg == nil && srn.currentMode == SHELTERING {
@@ -502,8 +519,6 @@ func (srn *SaucrRaftNode) updatePMonitorCluster(cfg *adaptive.PerceptibleConfig,
 	}
 }
 
-var switchCount = 0
-
 // updatePManagerMode behaves similar to the description in etcd-notes-saucr-implementation.md
 func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *adaptive.PersistentStrategy {
 	var critical bool
@@ -513,11 +528,6 @@ func (srn *SaucrRaftNode) updatePManagerMode(cfg *adaptive.PerceptibleConfig) *a
 		critical = srn.PeerMonitor.IsCritical()
 	}
 	if srn.currentMode.IsConflictFromCritical(critical) {
-		switchCount++
-		if switchCount > 5 {
-			srn.lg.Info("check peer monitor", zap.String("status", srn.PeerMonitor.(*adaptive.SaucrMonitor).String()))
-		}
-
 		srn.currentMode = GetModeFromCritical(critical)
 		s := srn.PManager.GetStrategy()
 		s.Fsync = srn.currentMode.IsFsync()

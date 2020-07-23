@@ -24,7 +24,7 @@ var DefaultSaucrConfig = &SaucrConfig{
 	CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
 	HbcounterType:     adaptive.PolarizedCautiousHbCounterFactory,
 	SaucrModeSync:     true,
-	SaucrModeItv:      1 * time.Second,
+	SaucrModeItv:      100 * time.Millisecond,
 }
 
 type SaucrMode uint8

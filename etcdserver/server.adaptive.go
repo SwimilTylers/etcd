@@ -319,23 +319,27 @@ func (s *EtcdSaucrServer) Process(ctx context.Context, m raftpb.Message) error {
 		return httptypes.NewHTTPError(http.StatusForbidden, "cannot process message from removed member")
 	}
 
-	// if it involves in MsgSaucr, send it to SaucrRaftNode's routine
+	// if it involves in MsgSaucr/MsgSaucrResp, intercept it
 	if isMsgSaucr(m.Type) {
 		s.srn.ReceiveMsgSaucr(m)
+		return nil
+	} else if isMsgSaucrResp(m.Type) {
+		s.srn.PeerMonitor.Perceive(m.From, true)
 		return nil
 	}
 
 	if m.Type == raftpb.MsgApp {
 		s.stats.RecvAppendReq(types.ID(m.From).String(), m.Size())
-	} else if m.Type == raftpb.MsgHeartbeatResp {
-		s.srn.PeerMonitor.Perceive(m.From, true)
 	}
 	return s.r.Step(ctx, m)
 }
 
 func isMsgSaucr(mType raftpb.MessageType) bool {
-	return mType == raftpb.MsgSaucrNormal || mType == raftpb.MsgSaucrNormalResp ||
-		mType == raftpb.MsgSaucrSheltering || mType == raftpb.MsgSaucrShelteringResp
+	return mType == raftpb.MsgSaucrNormal || mType == raftpb.MsgSaucrSheltering
+}
+
+func isMsgSaucrResp(mType raftpb.MessageType) bool {
+	return mType == raftpb.MsgSaucrNormalResp || mType == raftpb.MsgSaucrShelteringResp
 }
 
 func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServer, err error) {
