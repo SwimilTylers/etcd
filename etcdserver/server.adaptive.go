@@ -563,8 +563,7 @@ func NewEtcdSaucrServer(cfg ServerConfig, sCfg *SaucrConfig) (srv *EtcdSaucrServ
 		peers[i] = uint64(peerIds[i])
 	}
 
-	// all nodes should start from sheltering-follower
-	mode = SHELTERING
+	mode = sCfg.InitMode
 
 	pMonitorCfg := &adaptive.PerceptibleConfig{
 		State:    raft.StateFollower,

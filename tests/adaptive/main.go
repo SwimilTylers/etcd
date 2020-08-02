@@ -13,9 +13,10 @@ import (
 
 var (
 	restart   = flag.Bool("restart", false, "whether running in restart mode")
-	doNothing = flag.Bool("doNothing", false, "whether use doNothing scheduler")
+	scheduler = flag.String("s", "mode switch", "choose scheduler type")
 	bench     = flag.String("b", "benchtool", "choose bench tool")
 	runner    = flag.String("r", "etcd", "choose runner type")
+	pGenType  = flag.String("pg", "sequential", "choose designator perm generator type")
 )
 
 func main() {
@@ -32,6 +33,7 @@ func main() {
 	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
 	benchArgs[1]["total"] = "500000"
 	benchArgs[0]["clients"] = "24"
+	// benchArgs[1]["wait"] = "60m"
 	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 	// clusters
@@ -48,7 +50,7 @@ func main() {
 		}
 	}
 
-	var size = 3
+	var size = 5
 	// var hosts []string
 	var selected []int
 	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
@@ -62,6 +64,19 @@ func main() {
 		go utils.CreateBenchVerifyShell(size)
 	default:
 		panic("unknown bench tool")
+	}
+
+	switch *pGenType {
+	case "sequential":
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.SequentialDesignatorPermGenerator)
+	case "random":
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.RandomDesignatorPermGenerator)
+	case "sync walk":
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, false)
+	case "async walk":
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, true)
+	default:
+		panic("unknown designator perm generator type")
 	}
 
 	var tester tests.TestRunner
@@ -81,48 +96,288 @@ func main() {
 		panic("unknown runner type")
 	}
 
+	var (
+		ModeSwitchItv  = 15 * time.Second
+		UnavailableItv = 10 * time.Second
+		ExtremeItv     = 5 * time.Second
+		AutoItv        = 10 * time.Second
+	)
+
 	var sch tests.Scheduler
 
-	if *restart || *doNothing {
+	if *restart {
 		sch = tests.DoNothing
 	} else {
-		sch = MakeModeSwitchScenario(tester.Restart, size, 10*time.Second)
+		switch *scheduler {
+		case "do nothing":
+			sch = tests.DoNothing
+		case "leader crash":
+			sch = MakeLeaderCrashScenario(tester.Restart, size, ModeSwitchItv)
+		case "mode switch":
+			sch = MakeModeSwitchScenario(tester.Restart, size, ModeSwitchItv)
+		case "unavailable":
+			sch = MakeUnavailableScenario(tester.Restart, size, UnavailableItv)
+		case "mode switch + leader crash":
+			sch = MakeLeaderCrashModeSwitchScenario(tester.Restart, size, ModeSwitchItv)
+		case "unavailable + leader crash":
+			sch = MakeLeaderCrashUnavailableScenario(tester.Restart, size, UnavailableItv)
+		case "extreme":
+			sch = MakeExtremeScenario(tester.Restart, size, ExtremeItv)
+		case "auto":
+			sch = MakeScenarios(tester.Restart, size, AutoItv)
+		default:
+			panic("unknown scheduler type")
+		}
 	}
 
-	Pause(GetTesterRunnerInfo(tester, size, selected))
+	Pause(GetTesterRunnerInfo(tester, size, selected), "\nscenario: ", sch.String())
 
 	Run(tester, size, selected...)(sch)
 }
 
-func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+func MakeLeaderCrashScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
 	switch size {
 	case 3:
 		return tests.NewSchedulerBuilder(size).
 			Init().
-			Shutdown(itv, []int{0}).
-			Restart(itv, restart, []int{0}).
+			DisableStaticRunningStateCheck().
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
 			Build()
 	case 5:
 		return tests.NewSchedulerBuilder(size).
 			Init().
-			Shutdown(itv, []int{0}).
-			Shutdown(itv, []int{1}).
-			Restart(itv, restart, []int{0}).
-			Restart(itv, restart, []int{1}).
+			DisableStaticRunningStateCheck().
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
 			Build()
 	case 7:
 		return tests.NewSchedulerBuilder(size).
 			Init().
-			Shutdown(itv, []int{0}).
-			Shutdown(itv, []int{1}).
-			Shutdown(itv, []int{2}).
-			Restart(itv, restart, []int{0}).
-			Restart(itv, restart, []int{1}).
-			Restart(itv, restart, []int{2}).
+			DisableStaticRunningStateCheck().
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
 			Build()
 	default:
 		return tests.DoNothing
 	}
+}
+
+func MakeModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(tests.CrashDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			RestartNext(itv, restart).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeLeaderCrashModeSwitchScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(tests.CrashDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			LoadDesignator(designator).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
+			RestartNext(itv, restart).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeUnavailableScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(tests.CrashDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeLeaderCrashUnavailableScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(tests.CrashDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
+			RestartNext(itv, restart).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			LoadDesignator(designator).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownNext(itv).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			ChangeConditionAll(tests.ConditionTrue).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			RestartNext(itv, restart).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeExtremeScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			DisableStaticRunningStateCheck().
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			ShutdownOnCondition(itv, tests.ConditionIsLeader).
+			RestartOnCondition(itv, restart, tests.ConditionSame).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeScenarios(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(tests.CrashDesignator)
+
+	return tests.NewSchedulerBuilder(size).
+		Init().
+		LoadDesignator(designator).
+		AutoBuild(itv, restart)
 }
 
 func RemoveHistory() error {
@@ -167,8 +422,10 @@ func Run(runner tests.TestRunner, size int, selected ...int) func(scheduler test
 	}
 }
 
-func Pause(msg string) {
-	_, _ = os.Stdout.WriteString(msg)
+func Pause(msg ...string) {
+	for _, m := range msg {
+		_, _ = os.Stdout.WriteString(m)
+	}
 	_, _ = bufio.NewReader(os.Stdin).ReadByte()
 }
 

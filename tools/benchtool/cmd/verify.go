@@ -19,12 +19,14 @@ var verifyCmd = &cobra.Command{
 var (
 	vFile       string
 	verifyTotal int
+	eDir        string
 )
 
 func init() {
 	RootCmd.AddCommand(verifyCmd)
 	verifyCmd.Flags().StringVar(&vFile, "verification-file", "v.dat", "verification file path")
 	verifyCmd.Flags().IntVar(&verifyTotal, "total", 10000, "Total number of get requests")
+	verifyCmd.Flags().StringVar(&eDir, "error-file-dr", "./test-verify-error", "error file directory")
 }
 
 func verifyFunc(cmd *cobra.Command, args []string) {

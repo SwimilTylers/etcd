@@ -10,7 +10,9 @@ type SaucrConfig struct {
 	MaxLocalCacheSize int
 	CachePreserveTime time.Duration
 
-	HbcounterType func() adaptive.HeartbeatCounter
+	InitMode           SaucrMode
+	UseDisabledMonitor bool
+	HbcounterType      func() adaptive.HeartbeatCounter
 
 	SaucrModeSync bool
 	SaucrModeItv  time.Duration
@@ -20,11 +22,13 @@ type SaucrConfig struct {
 }
 
 var DefaultSaucrConfig = &SaucrConfig{
-	MaxLocalCacheSize: adaptive.DefaultStrategy.MaxLocalCacheSize,
-	CachePreserveTime: adaptive.DefaultStrategy.CachePreserveTime,
-	HbcounterType:     adaptive.PolarizedCautiousHbCounterFactory,
-	SaucrModeSync:     true,
-	SaucrModeItv:      100 * time.Millisecond,
+	MaxLocalCacheSize:  adaptive.DefaultStrategy.MaxLocalCacheSize,
+	CachePreserveTime:  adaptive.DefaultStrategy.CachePreserveTime,
+	InitMode:           SHELTERING,
+	UseDisabledMonitor: false,
+	HbcounterType:      adaptive.PolarizedCautiousHbCounterFactory,
+	SaucrModeSync:      true,
+	SaucrModeItv:       100 * time.Millisecond,
 }
 
 type SaucrMode uint8

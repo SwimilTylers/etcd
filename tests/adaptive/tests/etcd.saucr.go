@@ -207,11 +207,12 @@ func TurnSaucrIntoVolatile() (oldSCfg *etcdserver.SaucrConfig) {
 	oldSCfg = GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
 
 	newSCfg := &etcdserver.SaucrConfig{
-		MaxLocalCacheSize: oldSCfg.MaxLocalCacheSize,
-		CachePreserveTime: oldSCfg.CachePreserveTime,
-		HbcounterType:     adaptive.AlwaysConnectHbCounterFactory,
-		SaucrModeSync:     oldSCfg.SaucrModeSync,
-		SaucrModeItv:      oldSCfg.SaucrModeItv,
+		MaxLocalCacheSize:  oldSCfg.MaxLocalCacheSize,
+		CachePreserveTime:  oldSCfg.CachePreserveTime,
+		InitMode:           etcdserver.NORMAL,
+		UseDisabledMonitor: true,
+		HbcounterType:      adaptive.AlwaysConnectHbCounterFactory,
+		SaucrModeSync:      false,
 	}
 
 	GlobalRunnerConfigs["saucr"] = newSCfg
@@ -222,11 +223,12 @@ func TurnSaucrIntoPersistent() (oldSCfg *etcdserver.SaucrConfig) {
 	oldSCfg = GlobalRunnerConfigs["saucr"].(*etcdserver.SaucrConfig)
 
 	newSCfg := &etcdserver.SaucrConfig{
-		MaxLocalCacheSize: oldSCfg.MaxLocalCacheSize,
-		CachePreserveTime: oldSCfg.CachePreserveTime,
-		HbcounterType:     adaptive.AlwaysDisconnectHbCounterFactory,
-		SaucrModeSync:     oldSCfg.SaucrModeSync,
-		SaucrModeItv:      oldSCfg.SaucrModeItv,
+		MaxLocalCacheSize:  oldSCfg.MaxLocalCacheSize,
+		CachePreserveTime:  oldSCfg.CachePreserveTime,
+		InitMode:           etcdserver.SHELTERING,
+		UseDisabledMonitor: true,
+		HbcounterType:      adaptive.AlwaysDisconnectHbCounterFactory,
+		SaucrModeSync:      false,
 	}
 
 	GlobalRunnerConfigs["saucr"] = newSCfg

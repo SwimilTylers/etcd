@@ -118,7 +118,7 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 				if pMonitorCfg != nil {
 					if err := srn.PeerMonitor.SetConfig(pMonitorCfg); err != nil {
 						if srn.lg != nil {
-							srn.lg.Fatal(
+							srn.lg.Warn(
 								"failed to transform the mode of PMonitor",
 								zap.Error(err),
 								zap.Bool("is-leader", isLead),
@@ -126,7 +126,20 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 								zap.String("cfg", fmt.Sprintf("%+v", pMonitorCfg)),
 							)
 						} else {
-							plog.Fatalf("failed to transform the mode of PMonitor: %v", err)
+							plog.Warningf("failed to transform the mode of PMonitor: %v", err)
+						}
+
+						// use de facto PeerMonitor Config
+						pMonitorCfg = srn.PeerMonitor.GetConfig()
+						if srn.lg != nil {
+							srn.lg.Warn(
+								"use de facto PMonitor config",
+								zap.Bool("is-leader", isLead),
+								zap.Bool("is-follower", isFollower),
+								zap.String("de-facto-cfg", fmt.Sprintf("%+v", pMonitorCfg)),
+							)
+						} else {
+							plog.Warningf("use de facto PMonitor config: %v", pMonitorCfg)
 						}
 					} else {
 						if srn.lg != nil {
@@ -671,18 +684,30 @@ func NewSaucrRaftNode(r *raftNode, pMonitorCfg *adaptive.PerceptibleConfig, pMan
 	var monitor adaptive.Perceptible
 	var err error
 
-	if len(pMonitorCfg.Peers) < 3 {
+	if sConfig.UseDisabledMonitor {
 		if r.lg != nil {
-			r.lg.Info("Saucr requires a cluster of at least 3 peers",
-				zap.Int("peer-len", len(pMonitorCfg.Peers)),
-				zap.String("substitute", "InactivatedMonitor"),
+			r.lg.Info("Saucr adaptivity has been deactivated",
+				zap.Bool("init-fsync", pManagerStg.Fsync),
+				zap.String("substitute", "DisabledMonitor"),
 			)
 		} else {
 			plog.Infof("Saucr requires a cluster of at least 3 peers: using InactivatedMonitor")
 		}
-		monitor, err = adaptive.NewInactivatedMonitor(r.lg, pMonitorCfg, adaptive.GetSaucrMonitorActivation(sConfig.HbcounterType))
+		monitor, err = adaptive.NewDisabledMonitor(r.lg, pMonitorCfg)
 	} else {
-		monitor, err = adaptive.NewSaucrMonitor(r.lg, sConfig.HbcounterType, pMonitorCfg)
+		if len(pMonitorCfg.Peers) < 3 {
+			if r.lg != nil {
+				r.lg.Info("Saucr requires a cluster of at least 3 peers",
+					zap.Int("peer-len", len(pMonitorCfg.Peers)),
+					zap.String("substitute", "InactivatedMonitor"),
+				)
+			} else {
+				plog.Infof("Saucr requires a cluster of at least 3 peers: using InactivatedMonitor")
+			}
+			monitor, err = adaptive.NewInactivatedMonitor(r.lg, pMonitorCfg, adaptive.GetSaucrMonitorActivation(sConfig.HbcounterType))
+		} else {
+			monitor, err = adaptive.NewSaucrMonitor(r.lg, sConfig.HbcounterType, pMonitorCfg)
+		}
 	}
 
 	if err != nil {
