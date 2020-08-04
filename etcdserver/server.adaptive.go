@@ -222,7 +222,7 @@ func (s *EtcdSaucrServer) run() {
 
 		// must stop raft after scheduler-- etcdserver can leak rafthttp pipelines
 		// by adding a peer after raft stops the transport
-		s.r.stop()
+		s.srn.stop()
 
 		// kv, lessor and backend can be nil if running without v3 enabled
 		// or running unit tests.

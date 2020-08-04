@@ -7,6 +7,7 @@ import (
 	"go.etcd.io/etcd/embed"
 	"go.etcd.io/etcd/tests/adaptive/tests"
 	"go.etcd.io/etcd/tests/adaptive/utils"
+	"math/rand"
 	"os"
 	"time"
 )
@@ -17,6 +18,8 @@ var (
 	bench     = flag.String("b", "benchtool", "choose bench tool")
 	runner    = flag.String("r", "etcd", "choose runner type")
 	pGenType  = flag.String("pg", "sequential", "choose designator perm generator type")
+	pGenSeed  = flag.Int64("seed", rand.Int63(), "give random walk designator a seed. Only works when choosing 'sync walk' or 'async walk' designator perm generator")
+	violent   = flag.Bool("v", false, "whether to terminate server violently when necessary. If false, use etcd internal signal mechanism")
 )
 
 func main() {
@@ -24,17 +27,9 @@ func main() {
 	tests.InitRunnerConfig()
 	utils.InitClientConfig()
 
-	if *bench == "benchtool" {
-		utils.UseBenchTool()
-	}
-
 	// change Global Args
 	tests.GlobalRunnerConfigs["remain-duration"] = 10 * time.Minute
-	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-	benchArgs[1]["total"] = "500000"
-	benchArgs[0]["clients"] = "24"
-	// benchArgs[1]["wait"] = "60m"
-	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
+	tests.GlobalRunnerConfigs["violent-stop"] = *violent
 
 	// clusters
 	tests.GlobalRunnerConfigs["available-machine"] = []string{
@@ -57,24 +52,15 @@ func main() {
 	// hosts, selected = GetRemoteCluster(size)
 	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeDistinctCluster(hosts)
 
-	switch *bench {
-	case "benchmark":
-		go utils.CreateBenchShell(size)
-	case "benchtool":
-		go utils.CreateBenchVerifyShell(size)
-	default:
-		panic("unknown bench tool")
-	}
-
 	switch *pGenType {
 	case "sequential":
 		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.SequentialDesignatorPermGenerator)
 	case "random":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.RandomDesignatorPermGenerator)
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.GetRandomDesignatorPermGenerator(rand.NewSource(*pGenSeed)))
 	case "sync walk":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, false)
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, false, rand.NewSource(*pGenSeed))
 	case "async walk":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, true)
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, true, rand.NewSource(*pGenSeed))
 	default:
 		panic("unknown designator perm generator type")
 	}
@@ -87,20 +73,20 @@ func main() {
 	case "saucr":
 		tester = tests.SaucrServerTestRunner
 	case "volatile":
-		tester = tests.SaucrServerTestRunner
 		tests.TurnSaucrIntoVolatile()
-	case "persistent":
 		tester = tests.SaucrServerTestRunner
+	case "persistent":
 		tests.TurnSaucrIntoPersistent()
+		tester = tests.SaucrServerTestRunner
 	default:
 		panic("unknown runner type")
 	}
 
 	var (
-		ModeSwitchItv  = 15 * time.Second
+		ModeSwitchItv  = 10 * time.Second
 		UnavailableItv = 10 * time.Second
 		ExtremeItv     = 5 * time.Second
-		AutoItv        = 10 * time.Second
+		AutoItv        = 5 * time.Second
 	)
 
 	var sch tests.Scheduler
@@ -128,6 +114,26 @@ func main() {
 		default:
 			panic("unknown scheduler type")
 		}
+	}
+
+	if *bench == "benchtool" {
+		utils.UseBenchTool()
+	}
+
+	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
+	benchArgs[1]["total"] = "800000"
+	benchArgs[0]["clients"] = "24"
+	// benchArgs[1]["wait"] = "60m"
+	// benchArgs[0]["lifetime"] = "10m"
+	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
+
+	switch *bench {
+	case "benchmark":
+		go utils.CreateBenchShell(size)
+	case "benchtool":
+		go utils.CreateBenchVerifyShell(size)
+	default:
+		panic("unknown bench tool")
 	}
 
 	Pause(GetTesterRunnerInfo(tester, size, selected), "\nscenario: ", sch.String())

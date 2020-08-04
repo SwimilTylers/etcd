@@ -6,6 +6,7 @@ import (
 	"go.etcd.io/etcd/etcdserver"
 	"go.uber.org/zap"
 	"log"
+	"strings"
 )
 
 func startOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig) (*embed.Etcd, error) {
@@ -216,6 +217,7 @@ func TurnSaucrIntoVolatile() (oldSCfg *etcdserver.SaucrConfig) {
 	}
 
 	GlobalRunnerConfigs["saucr"] = newSCfg
+	SaucrServerTestRunner.Name = strings.Join([]string{SaucrServerTestRunner.Name, "(volatile)"}, "")
 	return oldSCfg
 }
 
@@ -232,5 +234,6 @@ func TurnSaucrIntoPersistent() (oldSCfg *etcdserver.SaucrConfig) {
 	}
 
 	GlobalRunnerConfigs["saucr"] = newSCfg
+	SaucrServerTestRunner.Name = strings.Join([]string{SaucrServerTestRunner.Name, "(persistent)"}, "")
 	return oldSCfg
 }
