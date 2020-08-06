@@ -20,6 +20,9 @@ var (
 	pGenType  = flag.String("pg", "sequential", "choose designator perm generator type")
 	pGenSeed  = flag.Int64("seed", rand.Int63(), "give random walk designator a seed. Only works when choosing 'sync walk' or 'async walk' designator perm generator")
 	violent   = flag.Bool("v", false, "whether to terminate server violently when necessary. If false, use etcd internal signal mechanism")
+
+	expGIns = flag.Bool("experimental-goroutine-instances", false, "use experimental GeneralGoroutineTesterRunner as the wrapper runner")
+	expPIns = flag.Bool("experimental-process-instances", false, "use experimental GeneralProcessTesterRunner as the wrapper runner")
 )
 
 func main() {
@@ -80,6 +83,20 @@ func main() {
 		tester = tests.SaucrServerTestRunner
 	default:
 		panic("unknown runner type")
+	}
+
+	if *expGIns {
+		tester = tests.UseExperimentalTesterRunner(tester, "goroutine-based")
+
+		if *expPIns {
+			panic("conflict experimental option")
+		}
+	} else if *expPIns {
+		tester = tests.UseExperimentalTesterRunner(tester, "process-based")
+
+		if *expGIns {
+			panic("conflict experimental option")
+		}
 	}
 
 	var (
@@ -340,6 +357,7 @@ func MakeLeaderCrashUnavailableScenario(restart func(*tests.CDescriptor, int) (*
 	}
 }
 
+// the action of this scenario is unstable
 func MakeExtremeScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
 	switch size {
 	case 3:

@@ -215,7 +215,7 @@ func (s *EtcdSaucrServer) run() {
 
 		sched.Stop()
 
-		// wait for gouroutines before closing raft so wal stays open
+		// wait for goroutines before closing raft so wal stays open
 		s.wg.Wait()
 
 		s.SyncTicker.Stop()

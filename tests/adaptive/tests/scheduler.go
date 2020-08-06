@@ -39,6 +39,9 @@ type SchedulerBuilder struct {
 	srvTerminate   chan struct{}
 	totalTerminate chan struct{}
 
+	shutFuncGen    func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error)
+	restartFuncGen func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error)
+
 	desc strings.Builder
 }
 
@@ -62,6 +65,10 @@ func (b *SchedulerBuilder) Init() *SchedulerBuilder {
 	}
 	b.disableCheck = false
 	b.desc.WriteString(fmt.Sprintf("[init, size=%d]", len(b.topIsRunning)))
+
+	b.shutFuncGen = GlobalRunnerConfigs["sch-shut"].(func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error))
+	b.restartFuncGen = GlobalRunnerConfigs["sch-restart"].(func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error))
+
 	return b
 }
 
@@ -128,20 +135,15 @@ func (b *SchedulerBuilder) Shutdown(after time.Duration, srv []int) *SchedulerBu
 		idle[i] = true
 	}
 
+	cluster := GlobalRunnerConfigs[fmt.Sprintf("c%d", len(b.events))].(*CDescriptor)
+
 	for _, s := range srv {
 		idle[s] = false
 		b.events[s] = append(b.events[s],
 			&SchedulerEvent{
 				after: after,
 				test:  ConditionTrue.test,
-				event: func(etcd *embed.Etcd) (*embed.Etcd, error) {
-					etcd.Close()
-					etcd.Server.Logger().Info("this server is shut down by scheduler",
-						zap.String("srv-name", etcd.Server.Cfg.Name),
-						zap.String("srv-id", etcd.Server.ID().String()),
-					)
-					return etcd, nil
-				},
+				event: b.shutFuncGen(cluster, s),
 			},
 		)
 		b.topIsRunning[s] = false
@@ -161,19 +163,14 @@ func (b *SchedulerBuilder) ShutdownOnCondition(after time.Duration, condition Co
 		panic("condition-related ops is permitted when SRS Check is disabled")
 	}
 
+	cluster := GlobalRunnerConfigs[fmt.Sprintf("c%d", len(b.events))].(*CDescriptor)
+
 	for i, e := range b.events {
 		b.events[i] = append(e,
 			&SchedulerEvent{
 				after: after,
 				test:  condition.test,
-				event: func(etcd *embed.Etcd) (*embed.Etcd, error) {
-					etcd.Close()
-					etcd.Server.Logger().Info("this server is shut down by scheduler",
-						zap.String("srv-name", etcd.Server.Cfg.Name),
-						zap.String("srv-id", etcd.Server.ID().String()),
-					)
-					return etcd, nil
-				},
+				event: b.shutFuncGen(cluster, i),
 			},
 		)
 	}
@@ -182,19 +179,14 @@ func (b *SchedulerBuilder) ShutdownOnCondition(after time.Duration, condition Co
 }
 
 func (b *SchedulerBuilder) ShutdownAll(after time.Duration) *SchedulerBuilder {
+	cluster := GlobalRunnerConfigs[fmt.Sprintf("c%d", len(b.events))].(*CDescriptor)
+
 	for i, e := range b.events {
 		b.events[i] = append(e,
 			&SchedulerEvent{
 				after: after,
 				test:  ConditionTrue.test,
-				event: func(etcd *embed.Etcd) (*embed.Etcd, error) {
-					etcd.Close()
-					etcd.Server.Logger().Info("this server is shut down by scheduler",
-						zap.String("srv-name", etcd.Server.Cfg.Name),
-						zap.String("srv-id", etcd.Server.ID().String()),
-					)
-					return etcd, nil
-				},
+				event: b.shutFuncGen(cluster, i),
 			},
 		)
 		b.topIsRunning[i] = false
@@ -215,23 +207,11 @@ func (b *SchedulerBuilder) Restart(after time.Duration, r func(*CDescriptor, int
 			panic("[SRS Check]: cannot restart a running srv")
 		}
 		idle[s] = false
-		var id = s
 		b.events[s] = append(b.events[s],
 			&SchedulerEvent{
 				after: after,
 				test:  ConditionTrue.test,
-				event: func(etcd *embed.Etcd) (*embed.Etcd, error) {
-					srv, err := r(cluster, id)
-					if err != nil && srv != nil {
-						srv.Server.Logger().Info("this server will restart by scheduler",
-							zap.String("srv-name", srv.Server.Cfg.Name),
-							zap.String("srv-id", srv.Server.ID().String()),
-							zap.Int("restart-no", id),
-						)
-						<-srv.Server.ReadyNotify()
-					}
-					return srv, err
-				},
+				event: b.restartFuncGen(cluster, s, r),
 			},
 		)
 		b.topIsRunning[s] = true
@@ -259,23 +239,11 @@ func (b *SchedulerBuilder) RestartOnCondition(after time.Duration, r func(*CDesc
 	cluster := GlobalRunnerConfigs[fmt.Sprintf("c%d", len(b.events))].(*CDescriptor)
 	for s, e := range b.events {
 		idle[s] = false
-		var id = s
 		b.events[s] = append(e,
 			&SchedulerEvent{
 				after: after,
 				test:  condition.test,
-				event: func(etcd *embed.Etcd) (*embed.Etcd, error) {
-					srv, err := r(cluster, id)
-					if err != nil && srv != nil {
-						srv.Server.Logger().Info("this server will restart by scheduler",
-							zap.String("srv-name", srv.Server.Cfg.Name),
-							zap.String("srv-id", srv.Server.ID().String()),
-							zap.Int("restart-no", id),
-						)
-						<-srv.Server.ReadyNotify()
-					}
-					return srv, err
-				},
+				event: b.restartFuncGen(cluster, s, r),
 			},
 		)
 	}

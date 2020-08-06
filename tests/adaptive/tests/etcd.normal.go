@@ -50,7 +50,7 @@ var NormalServerTestRunner = TestRunner{
 			case e := <-scheduler.err:
 				logger.Fatal("receive error from scheduler", zap.Error(e))
 			case <-scheduler.end:
-				logger.Info("NormalServerTestRunner.Run terminated!")
+				logger.Info("NormalServerTestRunner.RunX terminated!")
 				return
 			}
 		}

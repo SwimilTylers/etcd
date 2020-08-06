@@ -332,6 +332,20 @@ func (srn *SaucrRaftNode) start(rh *raftReadyHandler) {
 	}()
 }
 
+func (srn *SaucrRaftNode) onStop() {
+	srn.Stop()
+	srn.ticker.Stop()
+	srn.transport.Stop()
+	if err := srn.PManager.Close(); err != nil {
+		if srn.lg != nil {
+			srn.lg.Panic("failed to close PManager", zap.Error(err))
+		} else {
+			plog.Panicf("raft close PManager error: %v", err)
+		}
+	}
+	close(srn.done)
+}
+
 func (srn *SaucrRaftNode) processMessages(ms []raftpb.Message) []raftpb.Message {
 	sentAppResp := false
 	for i := len(ms) - 1; i >= 0; i-- {
