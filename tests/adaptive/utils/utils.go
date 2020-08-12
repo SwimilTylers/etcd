@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -100,4 +101,25 @@ func MakeArgs(dicts []map[string]string, subCmd string) string {
 		}
 	}
 	return b.String()
+}
+
+func FetchAndGenerateExecArgs(supplement ...string) (string, []string) {
+	args := os.Args
+	args = append(args, supplement...)
+	return args[0], args
+}
+
+func ReadSelected(s string) []int {
+	if s == "all" {
+		return nil
+	} else {
+		var ret []int
+		slice := strings.Split(s, "[ ],")
+		for _, k := range slice {
+			if t, err := strconv.Atoi(k); err == nil {
+				ret = append(ret, t)
+			}
+		}
+		return ret
+	}
 }

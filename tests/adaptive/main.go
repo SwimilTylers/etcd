@@ -9,6 +9,7 @@ import (
 	"go.etcd.io/etcd/tests/adaptive/utils"
 	"math/rand"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -23,10 +24,24 @@ var (
 
 	expGIns = flag.Bool("experimental-goroutine-instances", false, "use experimental GeneralGoroutineTesterRunner as the wrapper runner")
 	expPIns = flag.Bool("experimental-process-instances", false, "use experimental GeneralProcessTesterRunner as the wrapper runner")
+
+	role = flag.String("role", "master", "role of this process. If role sets to 'master', it runs with a functional scheduler")
+
+	selectedS = flag.String("selected", "all", "select running servers")
+	pSize     = flag.Int("p", 5, "size of server cluster")
 )
 
 func main() {
 	flag.Parse()
+	fmt.Println("[*] pid:", os.Getpid(), "ppid:", os.Getppid())
+	if *role == "master" {
+		sub := tests.ForkExecExperiment(utils.FetchAndGenerateExecArgs("-seed", strconv.FormatInt(*pGenSeed, 10), "-role", "slave"))
+		tests.MasterExperiment(sub)
+	} else {
+		tests.SlaveExperiment()
+	}
+	os.Exit(0)
+
 	tests.InitRunnerConfig()
 	utils.InitClientConfig()
 
@@ -48,9 +63,9 @@ func main() {
 		}
 	}
 
-	var size = 5
+	var size = *pSize
 	// var hosts []string
-	var selected []int
+	var selected = utils.ReadSelected(*selectedS)
 	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeUniformCluster(size, "http://192.168.198.137")
 	// hosts, selected = GetRemoteCluster(size)
 	// tests.GlobalRunnerConfigs[fmt.Sprintf("c%d", size)] = tests.MakeDistinctCluster(hosts)
