@@ -24,7 +24,7 @@ func InitRunnerConfig() {
 
 	GlobalRunnerConfigs["standaloneIdx"] = 0
 
-	GlobalRunnerConfigs["sch-shut"] = func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error) {
+	GlobalRunnerConfigs["sch-shut"] = ShutGen(func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error) {
 		return func(etcd *embed.Etcd) (*embed.Etcd, error) {
 			etcd.Close()
 			etcd.Server.Logger().Info("this server is shut down by scheduler",
@@ -33,9 +33,9 @@ func InitRunnerConfig() {
 			)
 			return etcd, nil
 		}
-	}
+	})
 
-	GlobalRunnerConfigs["sch-restart"] = func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error) {
+	GlobalRunnerConfigs["sch-restart"] = RestartGen(func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error) {
 		return func(etcd *embed.Etcd) (*embed.Etcd, error) {
 			srv, err := r(cluster, id)
 			if err != nil && srv != nil {
@@ -48,5 +48,5 @@ func InitRunnerConfig() {
 			}
 			return srv, err
 		}
-	}
+	})
 }

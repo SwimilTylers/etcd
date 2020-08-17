@@ -48,6 +48,26 @@ func RemoveAllSrvLog() error {
 	return nil
 }
 
+func RemoveAllSchLog() error {
+	files, err := ioutil.ReadDir(".")
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		if strings.HasSuffix(file.Name(), "sch.log") {
+			if err := os.Remove(file.Name()); err != nil {
+				fmt.Println(file.Name(), ": remove failed")
+				return err
+			} else {
+				fmt.Println(file.Name(), ": remove success")
+			}
+		}
+	}
+
+	return nil
+}
+
 func ExtractArgs(args string, subCmd string) []map[string]string {
 	dicts := []map[string]string{make(map[string]string)}
 	if subCmd != "" {
@@ -114,7 +134,7 @@ func ReadSelected(s string) []int {
 		return nil
 	} else {
 		var ret []int
-		slice := strings.Split(s, "[ ],")
+		slice := strings.Split(strings.Trim(s, "[ ]"), ", ")
 		for _, k := range slice {
 			if t, err := strconv.Atoi(k); err == nil {
 				ret = append(ret, t)

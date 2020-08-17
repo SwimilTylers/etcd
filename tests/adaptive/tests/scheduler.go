@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go.etcd.io/etcd/embed"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"strings"
 	"time"
 )
@@ -23,6 +24,9 @@ func (s Scheduler) String() string {
 
 var DoNothing = Scheduler{do: func(int, *embed.Etcd) {}, err: make(chan error, 100), end: make(chan struct{}), desc: "do nothing"}
 
+type ShutGen func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error)
+type RestartGen func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error)
+
 type SchedulerEvent struct {
 	after time.Duration
 	test  func(etcd *embed.Etcd, localMark bool) bool
@@ -39,8 +43,8 @@ type SchedulerBuilder struct {
 	srvTerminate   chan struct{}
 	totalTerminate chan struct{}
 
-	shutFuncGen    func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error)
-	restartFuncGen func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error)
+	shutFuncGen    ShutGen
+	restartFuncGen RestartGen
 
 	desc strings.Builder
 }
@@ -66,8 +70,8 @@ func (b *SchedulerBuilder) Init() *SchedulerBuilder {
 	b.disableCheck = false
 	b.desc.WriteString(fmt.Sprintf("[init, size=%d]", len(b.topIsRunning)))
 
-	b.shutFuncGen = GlobalRunnerConfigs["sch-shut"].(func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error))
-	b.restartFuncGen = GlobalRunnerConfigs["sch-restart"].(func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error))
+	b.shutFuncGen = GlobalRunnerConfigs["sch-shut"].(ShutGen)
+	b.restartFuncGen = GlobalRunnerConfigs["sch-restart"].(RestartGen)
 
 	return b
 }
@@ -353,12 +357,36 @@ var (
 )
 
 func GetSchedulerLogger() (*zap.Logger, error) {
-	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
-	config.ErrorOutputPaths = append(config.ErrorOutputPaths, GlobalRunnerConfigs["scheduler-log-file"].(string))
-	config.OutputPaths = append(config.OutputPaths, GlobalRunnerConfigs["scheduler-log-file"].(string))
+	return zap.Config{
+		Level: zap.NewAtomicLevelAt(zap.InfoLevel),
 
-	return config.Build()
+		Development: false,
+		Sampling: &zap.SamplingConfig{
+			Initial:    100,
+			Thereafter: 100,
+		},
+
+		Encoding: "json",
+
+		// copied from "zap.NewProductionEncoderConfig" with some updates
+		EncoderConfig: zapcore.EncoderConfig{
+			TimeKey:        "ts",
+			LevelKey:       "level",
+			NameKey:        "logger",
+			CallerKey:      "caller",
+			MessageKey:     "msg",
+			StacktraceKey:  "stacktrace",
+			LineEnding:     zapcore.DefaultLineEnding,
+			EncodeLevel:    zapcore.LowercaseLevelEncoder,
+			EncodeTime:     zapcore.ISO8601TimeEncoder,
+			EncodeDuration: zapcore.StringDurationEncoder,
+			EncodeCaller:   zapcore.ShortCallerEncoder,
+		},
+
+		// Use "/dev/null" to discard all
+		OutputPaths:      []string{"stderr", GlobalRunnerConfigs["scheduler-log-file"].(string)},
+		ErrorOutputPaths: []string{"stderr", GlobalRunnerConfigs["scheduler-log-file"].(string)},
+	}.Build()
 }
 
 /*

@@ -9,23 +9,26 @@ import (
 	"go.etcd.io/etcd/tests/adaptive/utils"
 	"math/rand"
 	"os"
-	"strconv"
 	"time"
 )
 
 var (
 	restart   = flag.Bool("restart", false, "whether running in restart mode")
 	scheduler = flag.String("s", "mode switch", "choose scheduler type")
-	bench     = flag.String("b", "benchtool", "choose bench tool")
+	bench     = flag.String("b", "benchtool", "choose bench tool. Only works when '-csh' sets to true")
 	runner    = flag.String("r", "etcd", "choose runner type")
 	pGenType  = flag.String("pg", "sequential", "choose designator perm generator type")
-	pGenSeed  = flag.Int64("seed", rand.Int63(), "give random walk designator a seed. Only works when choosing 'sync walk' or 'async walk' designator perm generator")
-	violent   = flag.Bool("v", false, "whether to terminate server violently when necessary. If false, use etcd internal signal mechanism")
+	pGenSeed  = flag.Int64("seed", rand.Int63(), "give random walk designator a seed. Only works when choosing 'sync walk' or 'async walk' designator permutation generator")
+	cShell    = flag.Bool("csh", true, "choose whether to generate client shell")
+	rmLog     = flag.Bool("-rlog", true, "choose whether to remove all log files")
+	verbose   = flag.Bool("V", true, "choose whether to check test info interactively before starting")
 
 	expGIns = flag.Bool("experimental-goroutine-instances", false, "use experimental GeneralGoroutineTesterRunner as the wrapper runner")
 	expPIns = flag.Bool("experimental-process-instances", false, "use experimental GeneralProcessTesterRunner as the wrapper runner")
 
-	role = flag.String("role", "master", "role of this process. If role sets to 'master', it runs with a functional scheduler")
+	role    = flag.String("role", "master", "experimental option: role of this process. Manual configuration of this flag is not recommended")
+	schPort = flag.Int("master-sch-port", 3953, "experimental option: the rpc port of scheduler on master process")
+	violent = flag.Bool("violent", false, "experiment option: whether to terminate server violently when necessary. If false, use graceful shutdown mechanism")
 
 	selectedS = flag.String("selected", "all", "select running servers")
 	pSize     = flag.Int("p", 5, "size of server cluster")
@@ -33,21 +36,12 @@ var (
 
 func main() {
 	flag.Parse()
-	fmt.Println("[*] pid:", os.Getpid(), "ppid:", os.Getppid())
-	if *role == "master" {
-		sub := tests.ForkExecExperiment(utils.FetchAndGenerateExecArgs("-seed", strconv.FormatInt(*pGenSeed, 10), "-role", "slave"))
-		tests.MasterExperiment(sub)
-	} else {
-		tests.SlaveExperiment()
-	}
-	os.Exit(0)
 
 	tests.InitRunnerConfig()
 	utils.InitClientConfig()
 
 	// change Global Args
 	tests.GlobalRunnerConfigs["remain-duration"] = 10 * time.Minute
-	tests.GlobalRunnerConfigs["violent-stop"] = *violent
 
 	// clusters
 	tests.GlobalRunnerConfigs["available-machine"] = []string{
@@ -57,7 +51,7 @@ func main() {
 	}
 	tests.GlobalRunnerConfigs["local-machine"] = "http://192.168.198.137"
 
-	if !*restart {
+	if *rmLog && !*restart && *role == "master" {
 		if err := RemoveHistory(); err != nil {
 			panic("err occurs when remove history")
 		}
@@ -102,15 +96,37 @@ func main() {
 
 	if *expGIns {
 		tester = tests.UseExperimentalTesterRunner(tester, "goroutine-based")
-
 		if *expPIns {
 			panic("conflict experimental option")
 		}
+		if *role != "master" {
+			panic("-role: unsupported for experimental goroutine-based tester runner option")
+		}
+		if *violent {
+			tests.GlobalRunnerConfigs["violent-stop"] = struct{}{}
+		}
 	} else if *expPIns {
 		tester = tests.UseExperimentalTesterRunner(tester, "process-based")
-
 		if *expGIns {
 			panic("conflict experimental option")
+		}
+		if *violent {
+			panic("-violent: unsupported for experimental process-based tester runner option")
+		}
+		switch *role {
+		case "master":
+			tests.WorkInMasterRole(size, *pGenSeed, *schPort)
+		case "slave":
+			tests.WorkInSlaveRole(selected[0], *schPort)
+		default:
+			panic("unsupported process role")
+		}
+	} else {
+		if *role != "master" {
+			panic("-role: unsupported for non-experimental option")
+		}
+		if *violent {
+			panic("-violent: unsupported for non-experimental option")
 		}
 	}
 
@@ -148,27 +164,31 @@ func main() {
 		}
 	}
 
-	if *bench == "benchtool" {
-		utils.UseBenchTool()
+	if *cShell && *role == "master" {
+		if *bench == "benchtool" {
+			utils.UseBenchTool()
+		}
+
+		benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
+		benchArgs[1]["total"] = "800000"
+		benchArgs[0]["clients"] = "24"
+		// benchArgs[1]["wait"] = "60m"
+		// benchArgs[0]["lifetime"] = "10m"
+		utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
+
+		switch *bench {
+		case "benchmark":
+			go utils.CreateBenchShell(size)
+		case "benchtool":
+			go utils.CreateBenchVerifyShell(size)
+		default:
+			panic("unknown bench tool")
+		}
 	}
 
-	benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-	benchArgs[1]["total"] = "800000"
-	benchArgs[0]["clients"] = "24"
-	// benchArgs[1]["wait"] = "60m"
-	// benchArgs[0]["lifetime"] = "10m"
-	utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
-
-	switch *bench {
-	case "benchmark":
-		go utils.CreateBenchShell(size)
-	case "benchtool":
-		go utils.CreateBenchVerifyShell(size)
-	default:
-		panic("unknown bench tool")
+	if *verbose {
+		Pause(GetTesterRunnerInfo(tester, size, selected), "\nscenario: ", sch.String())
 	}
-
-	Pause(GetTesterRunnerInfo(tester, size, selected), "\nscenario: ", sch.String())
 
 	Run(tester, size, selected...)(sch)
 }
@@ -432,6 +452,13 @@ func RemoveHistory() error {
 		return err
 	} else {
 		fmt.Println("all past srv log has been removed")
+	}
+
+	if err := utils.RemoveAllSchLog(); err != nil {
+		fmt.Println("cannot remove all sch log: ", err)
+		return err
+	} else {
+		fmt.Println("all past sch log has been removed")
 	}
 
 	return nil
