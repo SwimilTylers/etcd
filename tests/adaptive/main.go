@@ -28,6 +28,8 @@ var (
 
 	role    = flag.String("role", "master", "experimental option: role of this process. Manual configuration of this flag is not recommended")
 	schPort = flag.Int("master-sch-port", 3953, "experimental option: the rpc port of scheduler on master process")
+	etcdctl = flag.String("using-etcdctl-path", "", "experimental option: using etcdctl and its path. If you not want to use etcdctl, please do not this option")
+
 	violent = flag.Bool("violent", false, "experiment option: whether to terminate server violently when necessary. If false, use graceful shutdown mechanism")
 
 	selectedS = flag.String("selected", "all", "select running servers")
@@ -113,11 +115,15 @@ func main() {
 		if *violent {
 			panic("-violent: unsupported for experimental process-based tester runner option")
 		}
+		if *etcdctl != "" {
+			tests.GlobalRunnerConfigs["etcdctl"] = *etcdctl
+		}
+
 		switch *role {
 		case "master":
 			tests.WorkInMasterRole(size, *pGenSeed, *schPort)
 		case "slave":
-			tests.WorkInSlaveRole(selected[0], *schPort)
+			tests.WorkInSlaveRole(selected[0], *schPort, *restart)
 		default:
 			panic("unsupported process role")
 		}

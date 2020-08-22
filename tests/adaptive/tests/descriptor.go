@@ -3,7 +3,9 @@ package tests
 import (
 	"fmt"
 	"go.etcd.io/etcd/embed"
+	"go.etcd.io/etcd/pkg/types"
 	"net/url"
+	"os/exec"
 	"strings"
 )
 
@@ -157,4 +159,20 @@ func MakeDistinctCluster(hosts []string) *CDescriptor {
 		}
 	}
 	return cluster
+}
+
+func RemoveMemberUsingEtcdctl(ctl string, rSrv types.ID, tSrv []*SDescriptor) {
+	s := make([]string, len(tSrv))
+	for i, srv := range tSrv {
+		s[i] = strings.Join([]string{srv.name, srv.cPort.String()}, "=")
+	}
+	exec.Command(ctl, "--endpoints", strings.Join(s, ","), "member", "remove", rSrv.String()).Start()
+}
+
+func AddMemberUsingEtcdctl(ctl string, aSrv *SDescriptor, tSrv []*SDescriptor) {
+	s := make([]string, len(tSrv))
+	for i, srv := range tSrv {
+		s[i] = strings.Join([]string{srv.name, srv.cPort.String()}, "=")
+	}
+	exec.Command(ctl, "--endpoints", strings.Join(s, ","), "member", "add", aSrv.name, aSrv.pPort.String()).Start()
 }

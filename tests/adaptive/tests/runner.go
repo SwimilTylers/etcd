@@ -1,7 +1,9 @@
 package tests
 
 import (
+	"errors"
 	"go.etcd.io/etcd/embed"
+	"go.etcd.io/etcd/pkg/types"
 	"go.uber.org/zap"
 	"log"
 	"strings"
@@ -203,6 +205,7 @@ var GeneralProcessTestRunner = TestRunner{
 			// Scheduler of a slave process only affects its process-owned servers.
 			// In avoid of confession, a doNothing slave scheduler is recommended.
 			runner := GlobalRunnerConfigs["g_runner"].(TestRunner)
+			logger, _ := GetSchedulerLogger()
 			s := make([]*embed.Etcd, len(selected))
 			for i := 0; i < len(s); i++ {
 				go func(idx int) {
@@ -215,8 +218,13 @@ var GeneralProcessTestRunner = TestRunner{
 						return
 					}
 					<-srv.Server.ReadyNotify()
-					done.(func())()
-					scheduler.do(selected[idx], srv)
+					if fDone, ok := done.(func(slaveIdx int, id types.ID)); ok {
+						fDone(selected[idx], srv.Server.ID())
+						scheduler.do(selected[idx], srv)
+					} else {
+						logger.Error("scheduler init failed", zap.Error(errors.New("no proper init func")))
+					}
+
 				}(i)
 			}
 
@@ -224,9 +232,8 @@ var GeneralProcessTestRunner = TestRunner{
 				for _, etcd := range s {
 					etcd.Close()
 				}
+				logger.Sync()
 			}()
-
-			logger, _ := GetSchedulerLogger()
 
 			for {
 				select {

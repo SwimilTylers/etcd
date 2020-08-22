@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"go.etcd.io/etcd/embed"
+	"go.etcd.io/etcd/pkg/types"
 	"go.uber.org/zap"
 	"net"
 	"net/http"
@@ -21,12 +22,18 @@ type MasterProcessKit struct {
 	logger *zap.Logger
 	argv   [][]string
 	rArgv  [][]string
-	slaves []*os.Process
+
+	sProcess []*os.Process
+	sId      []types.ID
+
+	usingEtcdCtl bool
+	ctlPath      string
 
 	shutGen    ShutGen
 	restartGen RestartGen
 
-	sWg   *sync.WaitGroup
+	sWg *sync.WaitGroup
+
 	lPort int
 }
 
@@ -34,9 +41,15 @@ type MasterProcessRPC struct {
 	relay chan<- interface{}
 }
 
-func (mpr *MasterProcessRPC) ClusterEstablished(slaveId int, accept *bool) error {
+type MasterProcessRPCArg struct {
+	Header string
+	Idx    int
+	Id     types.ID
+}
+
+func (mpr *MasterProcessRPC) ClusterEstablished(arg MasterProcessRPCArg, accept *bool) error {
 	select {
-	case mpr.relay <- slaveId:
+	case mpr.relay <- arg:
 		*accept = true
 	case <-time.After(50 * time.Millisecond):
 		*accept = false
@@ -45,7 +58,9 @@ func (mpr *MasterProcessRPC) ClusterEstablished(slaveId int, accept *bool) error
 }
 
 func (mpk *MasterProcessKit) Daemon() {
-	relay := make(chan interface{}, 2*len(mpk.slaves))
+	defer mpk.logger.Sync()
+
+	relay := make(chan interface{}, 2*len(mpk.sProcess))
 
 	r := &MasterProcessRPC{relay: relay}
 
@@ -58,8 +73,15 @@ func (mpk *MasterProcessKit) Daemon() {
 		panic("master scheduler rpc broken")
 	}
 
-	for range relay {
-		mpk.sWg.Done()
+	for m := range relay {
+		arg := m.(MasterProcessRPCArg)
+
+		if arg.Header == "START" {
+			mpk.sWg.Done()
+		}
+
+		mpk.sId[arg.Idx] = arg.Id
+		mpk.logger.Info("receive rpc call from slave", zap.Int("slave-id", arg.Idx), zap.String("slave-server-id", arg.Id.String()))
 	}
 }
 
@@ -89,7 +111,7 @@ func (mpk *MasterProcessKit) StartX(srv ...int) <-chan struct{} {
 			zap.Strings("cmd", mpk.argv[id]),
 		)
 
-		mpk.slaves[id] = cmd.Process
+		mpk.sProcess[id] = cmd.Process
 	}
 
 	result := make(chan struct{})
@@ -124,13 +146,13 @@ func (mpk *MasterProcessKit) RestartX(srv ...int) {
 			zap.Strings("cmd", mpk.rArgv[id]),
 		)
 
-		mpk.slaves[id] = cmd.Process
+		mpk.sProcess[id] = cmd.Process
 	}
 }
 
 func (mpk *MasterProcessKit) ShutX(srv ...int) {
 	for _, id := range srv {
-		p := mpk.slaves[id]
+		p := mpk.sProcess[id]
 		if p == nil {
 			mpk.logger.Error("fail to find slave process",
 				zap.Int("slave-id", id),
@@ -166,12 +188,20 @@ func NewMasterProcessKit(size int, seed int64, lPort int) *MasterProcessKit {
 	lg, _ := GetSchedulerLogger()
 
 	kit := &MasterProcessKit{
-		logger: lg,
-		sWg:    &sync.WaitGroup{},
-		slaves: make([]*os.Process, size),
-		argv:   make([][]string, size),
-		rArgv:  make([][]string, size),
-		lPort:  lPort,
+		logger:   lg,
+		sWg:      &sync.WaitGroup{},
+		sProcess: make([]*os.Process, size),
+		sId:      make([]types.ID, size),
+		argv:     make([][]string, size),
+		rArgv:    make([][]string, size),
+		lPort:    lPort,
+	}
+
+	if p, ok := GlobalRunnerConfigs["etcdctl"]; ok {
+		kit.usingEtcdCtl = true
+		kit.ctlPath = p.(string)
+	} else {
+		kit.usingEtcdCtl = false
 	}
 
 	for i := 0; i < size; i++ {
@@ -181,7 +211,7 @@ func NewMasterProcessKit(size int, seed int64, lPort int) *MasterProcessKit {
 
 	kit.shutGen = func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error) {
 		return func(etcd *embed.Etcd) (*embed.Etcd, error) {
-			p := kit.slaves[id]
+			p := kit.sProcess[id]
 			if p == nil {
 				kit.logger.Error("fail to find slave process",
 					zap.Int("slave-id", id),
@@ -211,11 +241,29 @@ func NewMasterProcessKit(size int, seed int64, lPort int) *MasterProcessKit {
 				zap.Int("slave-pid", p.Pid),
 			)
 
+			if kit.usingEtcdCtl {
+				RemoveMemberUsingEtcdctl(kit.ctlPath, kit.sId[id], cluster.members)
+				kit.logger.Info("slave server removed from cluster",
+					zap.String("etcd-ctl-path", kit.ctlPath),
+					zap.Int("slave-id", id),
+					zap.String("slave-server-id", kit.sId[id].String()),
+				)
+			}
+
 			return etcd, nil
 		}
 	}
 	kit.restartGen = func(cluster *CDescriptor, id int, r func(*CDescriptor, int) (*embed.Etcd, error)) func(etcd *embed.Etcd) (*embed.Etcd, error) {
 		return func(etcd *embed.Etcd) (*embed.Etcd, error) {
+			if kit.usingEtcdCtl {
+				member := cluster.members
+				AddMemberUsingEtcdctl(kit.ctlPath, member[id], member)
+				kit.logger.Info("slave server pre-added to cluster",
+					zap.String("etcd-ctl-path", kit.ctlPath),
+					zap.Int("slave-id", id),
+				)
+			}
+
 			cmd := exec.Command(kit.rArgv[id][0], kit.rArgv[id][1:]...)
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			cmd.Stdin = os.Stdin
@@ -237,7 +285,7 @@ func NewMasterProcessKit(size int, seed int64, lPort int) *MasterProcessKit {
 				zap.Strings("cmd", kit.rArgv[id]),
 			)
 
-			kit.slaves[id] = cmd.Process
+			kit.sProcess[id] = cmd.Process
 
 			return etcd, nil
 		}
@@ -254,7 +302,8 @@ func WriteArgvForSlave(id int, seed int64, restart bool) []string {
 		AddFlag("-s", "do nothing").                   // 5. Disable slave's scheduler
 		AddBoolFlag("-restart", restart).              // 6. Whether running in a restart mode
 		AddBoolFlag("-V", false).                      // 7. Mute the slave
-		Align().                                       // 8. Generate a new argv dict
+		RemoveFlag("-using-etcdctl-path").             // 8. Turn off etcdctl option
+		Align().                                       // 9. Generate a new argv dict
 		StringSlice()
 }
 
@@ -264,7 +313,7 @@ func WorkInMasterRole(size int, seed int64, schPort int) {
 		delete(GlobalRunnerConfigs, "slave_process")
 	}
 
-	GlobalRunnerConfigs["scheduler-log-file"] = "master-sch.log"
+	GlobalRunnerConfigs["scheduler-log-file"] = "test-master-sch.log"
 
 	InitRootArgvBuilder()
 
@@ -277,14 +326,22 @@ func WorkInMasterRole(size int, seed int64, schPort int) {
 	go kit.Daemon()
 }
 
-func WorkInSlaveRole(slaveId int, schPort int) {
-	GlobalRunnerConfigs["scheduler-log-file"] = fmt.Sprintf("slave-%d-sch.log", slaveId)
+func WorkInSlaveRole(slaveId int, schPort int, restart bool) {
+	GlobalRunnerConfigs["scheduler-log-file"] = fmt.Sprintf("test-slave-%d-sch.log", slaveId)
+	if restart {
+		GlobalRunnerConfigs["rpc-header"] = "RESTART"
+	} else {
+		GlobalRunnerConfigs["rpc-header"] = "START"
+	}
 
 	if client, err := rpc.DialHTTP("tcp", fmt.Sprintf("127.0.0.1:%d", schPort)); err == nil {
 		// mark flag
-		GlobalRunnerConfigs["slave_process"] = func() {
+		GlobalRunnerConfigs["slave_process"] = func(idx int, id types.ID) {
 			var reply bool
-			client.Call("MasterProcessRPC.ClusterEstablished", slaveId, &reply)
+			s := GlobalRunnerConfigs["rpc-header"].(string)
+			if err := client.Call("MasterProcessRPC.ClusterEstablished", MasterProcessRPCArg{Header: s, Id: id, Idx: idx}, &reply); err != nil {
+				panic(fmt.Sprintf("failed to call master's rpc, err=%v", err))
+			}
 		}
 	} else {
 		// mark flag
