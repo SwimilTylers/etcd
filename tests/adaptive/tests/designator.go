@@ -18,7 +18,7 @@ type CrashDesignator interface {
 	NextAction() (CrashDesignatorAction, []int)
 }
 
-type SimpleDesignator struct {
+type BitonicDesignator struct {
 	size int
 	cIdx int
 	rIdx int
@@ -26,36 +26,36 @@ type SimpleDesignator struct {
 	perm []int
 }
 
-func (sd *SimpleDesignator) NextCrash(s int) []int {
+func (dsg *BitonicDesignator) NextCrash(s int) []int {
 	var ret []int
 	for count := 0; count < s; count++ {
-		ret = append(ret, sd.perm[sd.cIdx])
-		sd.cIdx++
-		if sd.cIdx >= sd.size {
+		ret = append(ret, dsg.perm[dsg.cIdx])
+		dsg.cIdx++
+		if dsg.cIdx >= dsg.size {
 			break
 		}
 	}
 	return ret
 }
 
-func (sd *SimpleDesignator) NextRestart(s int) []int {
+func (dsg *BitonicDesignator) NextRestart(s int) []int {
 	var ret []int
 	for count := 0; count < s; count++ {
-		ret = append(ret, sd.perm[sd.rIdx])
-		sd.rIdx++
-		if sd.rIdx >= sd.size {
+		ret = append(ret, dsg.perm[dsg.rIdx])
+		dsg.rIdx++
+		if dsg.rIdx >= dsg.size {
 			break
 		}
 	}
 	return ret
 }
 
-func (sd *SimpleDesignator) NextAction() (CrashDesignatorAction, []int) {
+func (dsg *BitonicDesignator) NextAction() (CrashDesignatorAction, []int) {
 	return CDActionStop, nil
 }
 
-func NewDesignator(size int, pGenerator func(s int) []int) *SimpleDesignator {
-	return &SimpleDesignator{
+func NewDesignator(size int, pGenerator func(s int) []int) *BitonicDesignator {
+	return &BitonicDesignator{
 		size: size,
 		cIdx: 0,
 		rIdx: 0,
