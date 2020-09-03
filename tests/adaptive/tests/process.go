@@ -242,9 +242,24 @@ func NewMasterProcessKit(size int, seed int64, lPort int) *MasterProcessKit {
 			)
 
 			if kit.usingEtcdCtl {
-				RemoveMemberUsingEtcdctl(kit.ctlPath, kit.sId[id], cluster.members)
-				kit.logger.Info("slave server removed from cluster",
-					zap.String("etcd-ctl-path", kit.ctlPath),
+				if s, err := RemoveMemberUsingEtcdctl(kit.ctlPath, kit.sId[id], cluster.members); err != nil {
+					kit.logger.Error("slave server removed from cluster failed",
+						zap.Error(err),
+						zap.String("etcd-ctl-path", kit.ctlPath),
+						zap.Int("slave-id", id),
+						zap.String("slave-server-id", kit.sId[id].String()),
+					)
+				} else {
+					kit.logger.Info("slave server removed from cluster",
+						zap.String("etcd-ctl-path", kit.ctlPath),
+						zap.Int("slave-id", id),
+						zap.String("slave-server-id", kit.sId[id].String()),
+						zap.String("exec-output", string(s)),
+					)
+				}
+			} else {
+				kit.logger.Info("skip cluster re-conf",
+					zap.String("op", "shut"),
 					zap.Int("slave-id", id),
 					zap.String("slave-server-id", kit.sId[id].String()),
 				)
@@ -257,9 +272,22 @@ func NewMasterProcessKit(size int, seed int64, lPort int) *MasterProcessKit {
 		return func(etcd *embed.Etcd) (*embed.Etcd, error) {
 			if kit.usingEtcdCtl {
 				member := cluster.members
-				AddMemberUsingEtcdctl(kit.ctlPath, member[id], member)
-				kit.logger.Info("slave server pre-added to cluster",
-					zap.String("etcd-ctl-path", kit.ctlPath),
+				if s, err := AddMemberUsingEtcdctl(kit.ctlPath, member[id], member); err != nil {
+					kit.logger.Error("slave server pre-added to cluster failed",
+						zap.Error(err),
+						zap.String("etcd-ctl-path", kit.ctlPath),
+						zap.Int("slave-id", id),
+					)
+				} else {
+					kit.logger.Info("slave server pre-added to cluster",
+						zap.String("etcd-ctl-path", kit.ctlPath),
+						zap.Int("slave-id", id),
+						zap.String("exec-output", string(s)),
+					)
+				}
+			} else {
+				kit.logger.Info("skip cluster re-conf",
+					zap.String("op", "restart"),
 					zap.Int("slave-id", id),
 				)
 			}

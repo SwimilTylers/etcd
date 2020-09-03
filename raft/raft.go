@@ -1187,6 +1187,12 @@ func stepLeader(r *raft, m pb.Message) error {
 		if pr.State == tracker.StateReplicate && pr.Inflights.Full() {
 			pr.Inflights.FreeFirstOne()
 		}
+
+		if m.Reject {
+			pr.Match = m.RejectHint
+			r.logger.Info("reset %x's Match to %d", m.From, m.RejectHint)
+		}
+
 		if pr.Match < r.raftLog.lastIndex() {
 			r.sendAppend(m.From)
 		}
@@ -1393,6 +1399,13 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 }
 
 func (r *raft) handleHeartbeat(m pb.Message) {
+	defer func() {
+		if e := recover(); e != nil {
+			r.logger.Error("%x [lastIndex: %d] receive error when receiving Heartbeat, [msg-commit: %d, term: %d]",
+				r.id, r.raftLog.lastIndex(), m.Commit, m.Term)
+			r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Reject: true, RejectHint: r.raftLog.lastIndex(), Context: m.Context})
+		}
+	}()
 	r.raftLog.commitTo(m.Commit)
 	r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context})
 }

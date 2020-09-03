@@ -161,18 +161,18 @@ func MakeDistinctCluster(hosts []string) *CDescriptor {
 	return cluster
 }
 
-func RemoveMemberUsingEtcdctl(ctl string, rSrv types.ID, tSrv []*SDescriptor) {
+func RemoveMemberUsingEtcdctl(ctl string, rSrv types.ID, tSrv []*SDescriptor) ([]byte, error) {
 	s := make([]string, len(tSrv))
 	for i, srv := range tSrv {
 		s[i] = strings.Join([]string{srv.name, srv.cPort.String()}, "=")
 	}
-	exec.Command(ctl, "--endpoints", strings.Join(s, ","), "member", "remove", rSrv.String()).Start()
+	return exec.Command(ctl, "--endpoints", strings.Join(s, ","), "member", "remove", rSrv.String()).Output()
 }
 
-func AddMemberUsingEtcdctl(ctl string, aSrv *SDescriptor, tSrv []*SDescriptor) {
+func AddMemberUsingEtcdctl(ctl string, aSrv *SDescriptor, tSrv []*SDescriptor) ([]byte, error) {
 	s := make([]string, len(tSrv))
 	for i, srv := range tSrv {
 		s[i] = strings.Join([]string{srv.name, srv.cPort.String()}, "=")
 	}
-	exec.Command(ctl, "--endpoints", strings.Join(s, ","), "member", "add", aSrv.name, aSrv.pPort.String()).Start()
+	return exec.Command(ctl, "--endpoints", strings.Join(s, ","), "member", "add", aSrv.name, aSrv.pPort.String()).Output()
 }
