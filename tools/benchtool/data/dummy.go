@@ -48,6 +48,8 @@ func (d *dummyData) Results() string {
 	return "you dummy"
 }
 
+func (d *dummyData) Error(err error) {}
+
 func (d *dummyData) Load(file string) error {
 	return nil
 }

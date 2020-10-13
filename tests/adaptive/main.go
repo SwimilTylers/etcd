@@ -9,6 +9,8 @@ import (
 	"go.etcd.io/etcd/tests/adaptive/utils"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -18,9 +20,9 @@ var (
 	bench     = flag.String("b", "benchtool", "choose bench tool. Only works when '-csh' sets to true")
 	runner    = flag.String("r", "etcd", "choose runner type")
 	pGenType  = flag.String("pg", "sequential", "choose designator perm generator type")
-	pGenSeed  = flag.Int64("seed", rand.Int63(), "give random walk designator a seed. Only works when choosing 'sync walk' or 'async walk' designator permutation generator")
+	pGenSeed  = flag.Int64("seed", 0, "give randomized designator a seed. Generate a random seed when it sets to zero")
 	cShell    = flag.Bool("csh", true, "choose whether to generate client shell")
-	rmLog     = flag.Bool("-rlog", true, "choose whether to remove all log files")
+	rmLog     = flag.Bool("rlog", true, "choose whether to remove all log files")
 	verbose   = flag.Bool("V", true, "choose whether to check test info interactively before starting")
 
 	expGIns = flag.Bool("experimental-goroutine-instances", false, "use experimental GeneralGoroutineTesterRunner as the wrapper runner")
@@ -34,6 +36,18 @@ var (
 
 	selectedS = flag.String("selected", "all", "select running servers")
 	pSize     = flag.Int("p", 5, "size of server cluster")
+
+	scItv = flag.Duration("scenario-interval", 5*time.Second, "interval between scenario events")
+	rmDur = flag.Duration("remain-duration", 5*time.Minute, "remain duration after all scenario events have been done")
+
+	rType = flag.String("rtype", "static", "type of client request number")
+	rSize = flag.Int("rsize", 800000, "client request number")
+	rRate = flag.Int("rrate", 0, "client request rate")
+	rLife = flag.Duration("rlife", 5*time.Minute, "max duration of total request procedure")
+
+	cSize = flag.Int("c", 24, "number of client")
+
+	tcCfg = flag.String("tc", "", "path of tc config file")
 )
 
 func main() {
@@ -43,7 +57,19 @@ func main() {
 	utils.InitClientConfig()
 
 	// change Global Args
-	tests.GlobalRunnerConfigs["remain-duration"] = 10 * time.Minute
+	tests.GlobalRunnerConfigs["remain-duration"] = *rmDur
+	if *pGenSeed == 0 {
+		*pGenSeed = rand.Int63()
+	}
+	if *tcCfg != "" {
+		if tc, err := utils.GetTCFromYaml(*tcCfg); err != nil {
+			panic("cannot unmarshal yaml")
+		} else {
+			tests.GlobalRunnerConfigs["tc"] = tc
+			tc.Init()
+			defer tc.Clear()
+		}
+	}
 
 	// clusters
 	tests.GlobalRunnerConfigs["available-machine"] = []string{
@@ -68,13 +94,29 @@ func main() {
 
 	switch *pGenType {
 	case "sequential":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.SequentialDesignatorPermGenerator)
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewBitonicDesignator(size, tests.SequentialDesignatorPermGenerator)
 	case "random":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewDesignator(size, tests.GetRandomDesignatorPermGenerator(rand.NewSource(*pGenSeed)))
+		tests.GlobalRunnerConfigs["designator_random_seed"] = *pGenSeed
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewBitonicDesignator(size, tests.GetRandomDesignatorPermGenerator(rand.NewSource(*pGenSeed)))
 	case "sync walk":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, false, rand.NewSource(*pGenSeed))
+		tests.GlobalRunnerConfigs["designator_random_seed"] = *pGenSeed
+		tests.GlobalRunnerConfigs["rw-weight"] = tests.FlipMoreWeights
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, false, true, rand.NewSource(*pGenSeed))
 	case "async walk":
-		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, true, rand.NewSource(*pGenSeed))
+		tests.GlobalRunnerConfigs["designator_random_seed"] = *pGenSeed
+		tests.GlobalRunnerConfigs["rw-weight"] = tests.FlipMoreWeights
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, true, true, rand.NewSource(*pGenSeed))
+	case "flip-free sync walk":
+		tests.GlobalRunnerConfigs["designator_random_seed"] = *pGenSeed
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, false, false, rand.NewSource(*pGenSeed))
+	case "flip-free async walk":
+		tests.GlobalRunnerConfigs["designator_random_seed"] = *pGenSeed
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewRandomWalkDesignator(size, true, false, rand.NewSource(*pGenSeed))
+	case "bareback":
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewReshuffleDesignator(size, tests.SequentialDesignatorPermGenerator)
+	case "reshuffle":
+		tests.GlobalRunnerConfigs["designator_random_seed"] = *pGenSeed
+		tests.GlobalRunnerConfigs["s_designator"] = tests.NewReshuffleDesignator(size, tests.GetRandomDesignatorPermGenerator(rand.NewSource(*pGenSeed)))
 	default:
 		panic("unknown designator perm generator type")
 	}
@@ -136,13 +178,6 @@ func main() {
 		}
 	}
 
-	var (
-		ModeSwitchItv  = 10 * time.Second
-		UnavailableItv = 10 * time.Second
-		ExtremeItv     = 5 * time.Second
-		AutoItv        = 5 * time.Second
-	)
-
 	var sch tests.Scheduler
 
 	if *restart {
@@ -152,19 +187,25 @@ func main() {
 		case "do nothing":
 			sch = tests.DoNothing
 		case "leader crash":
-			sch = MakeLeaderCrashScenario(tester.Restart, size, ModeSwitchItv)
+			sch = MakeLeaderCrashScenario(tester.Restart, size, *scItv)
 		case "mode switch":
-			sch = MakeModeSwitchScenario(tester.Restart, size, ModeSwitchItv)
+			sch = MakeModeSwitchScenario(tester.Restart, size, *scItv)
 		case "unavailable":
-			sch = MakeUnavailableScenario(tester.Restart, size, UnavailableItv)
+			sch = MakeUnavailableScenario(tester.Restart, size, *scItv)
 		case "mode switch + leader crash":
-			sch = MakeLeaderCrashModeSwitchScenario(tester.Restart, size, ModeSwitchItv)
+			sch = MakeLeaderCrashModeSwitchScenario(tester.Restart, size, *scItv)
 		case "unavailable + leader crash":
-			sch = MakeLeaderCrashUnavailableScenario(tester.Restart, size, UnavailableItv)
+			sch = MakeLeaderCrashUnavailableScenario(tester.Restart, size, *scItv)
 		case "extreme":
-			sch = MakeExtremeScenario(tester.Restart, size, ExtremeItv)
+			sch = MakeExtremeScenario(tester.Restart, size, *scItv)
+		case "data loss":
+			sch = MakeDataLossBScenario(tester.Restart, size, *scItv)
+		case "weak data loss":
+			sch = MakeWeakDataLossBScenario(tester.Restart, size, *scItv)
+		case "delay":
+			sch = MakeDelayBScenario(tester.Restart, size, *scItv)
 		case "auto":
-			sch = MakeScenarios(tester.Restart, size, AutoItv)
+			sch = MakeScenarios(tester.Restart, size, *scItv)
 		default:
 			panic("unknown scheduler type")
 		}
@@ -176,10 +217,25 @@ func main() {
 		}
 
 		benchArgs := utils.ExtractArgs(utils.GlobalClientConfig["bench-arg-format"].(string), "put")
-		benchArgs[1]["total"] = "800000"
-		benchArgs[0]["clients"] = "24"
-		// benchArgs[1]["wait"] = "60m"
-		// benchArgs[0]["lifetime"] = "10m"
+
+		switch *rType {
+		case "static":
+			benchArgs[1]["total"] = strconv.Itoa(*rSize)
+		case "dynamic":
+			steps := strings.Count(sch.String(), "=>") + 1
+			benchArgs[1]["total"] = strconv.Itoa(steps * int(*scItv/time.Second) * *rRate)
+		}
+
+		benchArgs[1]["rate"] = strconv.Itoa(*rRate)
+		benchArgs[0]["clients"] = strconv.Itoa(*cSize)
+
+		switch *bench {
+		case "benchmark":
+			benchArgs[1]["wait"] = (*rLife).String()
+		case "benchtool":
+			benchArgs[0]["lifetime"] = (*rLife).String()
+		}
+
 		utils.GlobalClientConfig["bench-arg-format"] = utils.MakeArgs(benchArgs, "put")
 
 		switch *bench {
@@ -430,6 +486,126 @@ func MakeExtremeScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, err
 			ShutdownOnCondition(itv, tests.ConditionIsLeader).
 			ShutdownOnCondition(itv, tests.ConditionIsLeader).
 			RestartOnCondition(itv, restart, tests.ConditionSame).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeDataLossBScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(*tests.ReshuffledDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			ShutRestart(itv, restart, designator.MapTo(2), designator.MapTo(0, 1)).
+			Restart(itv, restart, designator.MapTo(2)).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Shutdown(itv, designator.MapTo(2)).
+			Shutdown(itv, designator.MapTo(3)).
+			ShutRestart(itv, restart, designator.MapTo(4), designator.MapTo(0, 1, 2, 3)).
+			Restart(itv, restart, designator.MapTo(4)).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Shutdown(itv, designator.MapTo(2)).
+			Shutdown(itv, designator.MapTo(3)).
+			Shutdown(itv, designator.MapTo(4)).
+			Shutdown(itv, designator.MapTo(5)).
+			ShutRestart(itv, restart, designator.MapTo(6), designator.MapTo(0, 1, 2, 3, 4, 5)).
+			Restart(itv, restart, designator.MapTo(6)).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeWeakDataLossBScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(*tests.ReshuffledDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			LoadShutFuncGen("soft", tests.GlobalRunnerConfigs["sch-soft-shut"].(tests.ShutGen)).
+			ShutRestart(itv, restart, designator.MapTo(2), designator.MapTo(0, 1)).
+			Restart(itv*2, restart, designator.MapTo(2)).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Shutdown(itv, designator.MapTo(2)).
+			Shutdown(itv, designator.MapTo(3)).
+			LoadShutFuncGen("soft", tests.GlobalRunnerConfigs["sch-soft-shut"].(tests.ShutGen)).
+			ShutRestart(itv, restart, designator.MapTo(4), designator.MapTo(0, 1, 2, 3)).
+			Restart(itv*2, restart, designator.MapTo(4)).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Shutdown(itv, designator.MapTo(2)).
+			Shutdown(itv, designator.MapTo(3)).
+			Shutdown(itv, designator.MapTo(4)).
+			Shutdown(itv, designator.MapTo(5)).
+			LoadShutFuncGen("soft", tests.GlobalRunnerConfigs["sch-soft-shut"].(tests.ShutGen)).
+			ShutRestart(itv, restart, designator.MapTo(6), designator.MapTo(0, 1, 2, 3, 4, 5)).
+			Restart(itv*2, restart, designator.MapTo(6)).
+			Build()
+	default:
+		return tests.DoNothing
+	}
+}
+
+func MakeDelayBScenario(restart func(*tests.CDescriptor, int) (*embed.Etcd, error), size int, itv time.Duration) tests.Scheduler {
+	designator := tests.GlobalRunnerConfigs["s_designator"].(*tests.ReshuffledDesignator)
+
+	switch size {
+	case 3:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Delay(itv, true, designator.MapTo(2)).
+			Restart(itv, restart, designator.MapTo(0, 1)).
+			Build()
+	case 5:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Shutdown(itv, designator.MapTo(2)).
+			Shutdown(itv, designator.MapTo(3)).
+			Delay(itv, true, designator.MapTo(4)).
+			Restart(itv, restart, designator.MapTo(0, 1, 2, 3)).
+			Build()
+	case 7:
+		return tests.NewSchedulerBuilder(size).
+			Init().
+			Shutdown(itv, designator.MapTo(0)).
+			Shutdown(itv, designator.MapTo(1)).
+			Shutdown(itv, designator.MapTo(2)).
+			Shutdown(itv, designator.MapTo(3)).
+			Shutdown(itv, designator.MapTo(4)).
+			Shutdown(itv, designator.MapTo(5)).
+			Delay(itv, true, designator.MapTo(6)).
+			Restart(itv, restart, designator.MapTo(0, 1, 2, 3, 4, 5)).
 			Build()
 	default:
 		return tests.DoNothing

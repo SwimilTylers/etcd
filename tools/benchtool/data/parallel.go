@@ -30,6 +30,8 @@ type parallelData struct {
 	infoWait sync.WaitGroup
 	conclude func() string
 
+	eMap map[error]int
+
 	closeCount int
 	done       chan struct{}
 }
@@ -88,6 +90,7 @@ func (p *parallelData) InitValidate(dataSize int, workerNum int, bufferSize int)
 func (p *parallelData) initInfoThread(bufferSize int) {
 	p.info = make(chan string, bufferSize)
 	p.infoWait.Add(1)
+	p.eMap = make(map[error]int)
 	go func() {
 		builder := strings.Builder{}
 		builder.WriteString("Some info from worker threads:\n")
@@ -117,7 +120,19 @@ func (p *parallelData) Confirm(resp clientv3.OpResponse) {
 	p.confirm <- resp
 }
 
+func (p *parallelData) Error(err error) {
+	if c, ok := p.eMap[err]; ok {
+		p.eMap[err] = c + 1
+	} else {
+		p.eMap[err] = 1
+	}
+}
+
 func (p *parallelData) Results() string {
+	for err, c := range p.eMap {
+		p.info <- fmt.Sprintf("[%d] %s", c, err)
+	}
+
 	close(p.info)
 	builder := strings.Builder{}
 	builder.WriteString(p.conclude())

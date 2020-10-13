@@ -1,0 +1,4 @@
+init_shell: ./tests/adaptive/init_gtc.sh
+clear_shell: ./tests/adaptive/clear_gtc.sh
+tc_dev: lo
+netem: [{key: NETEM_DELAY, val: delay 300ms, flow-id: "1:2"}]

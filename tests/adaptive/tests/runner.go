@@ -229,9 +229,6 @@ var GeneralProcessTestRunner = TestRunner{
 			}
 
 			defer func() {
-				for _, etcd := range s {
-					etcd.Close()
-				}
 				logger.Sync()
 			}()
 

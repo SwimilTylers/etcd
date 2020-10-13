@@ -7,6 +7,7 @@ import (
 	"go.uber.org/zap"
 	"log"
 	"strings"
+	"time"
 )
 
 func startOneSaucr(cluster *CDescriptor, idx int, sCfg *etcdserver.SaucrConfig) (*embed.Etcd, error) {
@@ -209,7 +210,7 @@ func TurnSaucrIntoVolatile() (oldSCfg *etcdserver.SaucrConfig) {
 
 	newSCfg := &etcdserver.SaucrConfig{
 		MaxLocalCacheSize:  oldSCfg.MaxLocalCacheSize,
-		CachePreserveTime:  oldSCfg.CachePreserveTime,
+		CachePreserveTime:  10 * time.Second,
 		InitMode:           etcdserver.NORMAL,
 		UseDisabledMonitor: true,
 		HbcounterType:      adaptive.AlwaysConnectHbCounterFactory,

@@ -173,7 +173,7 @@ func newWeightedReport() report.Report {
 	return report.NewWeightedReport(report.NewReport(p), p)
 }
 
-func runClients(clients []*clientv3.Client, requests <-chan clientv3.Op, response func(op clientv3.Op, opResponse clientv3.OpResponse), limit *rate.Limiter, r report.Report) *sync.WaitGroup {
+func runClients(clients []*clientv3.Client, requests <-chan clientv3.Op, rHandler func(op clientv3.Op, opResponse clientv3.OpResponse, err error), limit *rate.Limiter, r report.Report) *sync.WaitGroup {
 	wg := &sync.WaitGroup{}
 	for i := range clients {
 		wg.Add(1)
@@ -205,9 +205,7 @@ func runClients(clients []*clientv3.Client, requests <-chan clientv3.Op, respons
 						r.Results() <- report.Result{Err: err, Start: st, End: time.Now()}
 					}
 
-					if err == nil {
-						response(op, resp)
-					}
+					rHandler(op, resp, err)
 				}()
 
 				bar.Increment()

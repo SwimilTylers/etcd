@@ -351,6 +351,14 @@ func WorkInMasterRole(size int, seed int64, schPort int) {
 	GlobalRunnerConfigs["sch-shut"] = kit.shutGen
 	GlobalRunnerConfigs["sch-restart"] = kit.restartGen
 
+	GlobalRunnerConfigs["sch-soft-shut"] = ShutGen(
+		func(cluster *CDescriptor, id int) func(etcd *embed.Etcd) (*embed.Etcd, error) {
+			return func(etcd *embed.Etcd) (*embed.Etcd, error) {
+				return etcd, nil
+			}
+		},
+	)
+
 	go kit.Daemon()
 }
 

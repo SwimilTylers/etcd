@@ -75,8 +75,10 @@ func putFunc(cmd *cobra.Command, args []string) {
 
 	wg := runClients(clients,
 		database.Requests(),
-		func(op v3.Op, opResponse v3.OpResponse) {
-			database.Acknowledge(op, opResponse)
+		func(op v3.Op, opResponse v3.OpResponse, err error) {
+			if err == nil {
+				database.Acknowledge(op, opResponse)
+			}
 		},
 		rate.NewLimiter(rate.Limit(putRate), 1),
 		r,

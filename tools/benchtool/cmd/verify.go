@@ -24,6 +24,9 @@ var (
 
 func init() {
 	RootCmd.AddCommand(verifyCmd)
+
+	verifyCmd.Flags().IntVar(&putRate, "rate", 0, "Maximum puts per second (0 is no limit)")
+
 	verifyCmd.Flags().StringVar(&vFile, "verification-file", "v.dat", "verification file path")
 	verifyCmd.Flags().IntVar(&verifyTotal, "total", 10000, "Total number of get requests")
 	verifyCmd.Flags().StringVar(&eDir, "error-file-dr", "./test-verify-error", "error file directory")
@@ -43,7 +46,13 @@ func verifyFunc(cmd *cobra.Command, args []string) {
 	database.InitValidate(verifyTotal, int(totalConns), int(totalClients))
 	wg := runClients(clients,
 		database.Requests(),
-		func(op v3.Op, opResponse v3.OpResponse) { database.Confirm(opResponse) },
+		func(op v3.Op, opResponse v3.OpResponse, err error) {
+			if err == nil {
+				database.Confirm(opResponse)
+			} else {
+				database.Error(err)
+			}
+		},
 		nil,
 		nil,
 	)

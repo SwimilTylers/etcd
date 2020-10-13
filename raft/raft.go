@@ -1190,7 +1190,7 @@ func stepLeader(r *raft, m pb.Message) error {
 
 		if m.Reject {
 			pr.Match = m.RejectHint
-			r.logger.Info("reset %x's Match to %d", m.From, m.RejectHint)
+			r.logger.Infof("reset %x's Match to %d", m.From, m.RejectHint)
 		}
 
 		if pr.Match < r.raftLog.lastIndex() {
@@ -1401,7 +1401,7 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 func (r *raft) handleHeartbeat(m pb.Message) {
 	defer func() {
 		if e := recover(); e != nil {
-			r.logger.Error("%x [lastIndex: %d] receive error when receiving Heartbeat, [msg-commit: %d, term: %d]",
+			r.logger.Errorf("%x [lastIndex: %d] receive error when receiving Heartbeat, [msg-commit: %d, term: %d]",
 				r.id, r.raftLog.lastIndex(), m.Commit, m.Term)
 			r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Reject: true, RejectHint: r.raftLog.lastIndex(), Context: m.Context})
 		}

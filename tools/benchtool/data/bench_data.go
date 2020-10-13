@@ -24,6 +24,8 @@ type BenchData interface {
 	// Conclusions made by BenchData will be sent through Results channel
 	Results() string
 
+	Error(err error)
+
 	Load(file string) error
 	Store(file string) error
 
