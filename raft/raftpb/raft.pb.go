@@ -106,6 +106,7 @@ const (
 	MsgSaucrNormalResp     MessageType = 41
 	MsgSaucrSheltering     MessageType = 42
 	MsgSaucrShelteringResp MessageType = 43
+	MsgDRSync              MessageType = 46
 )
 
 var MessageType_name = map[int32]string{
@@ -132,6 +133,7 @@ var MessageType_name = map[int32]string{
 	41: "MsgSaucrNormalResp",
 	42: "MsgSaucrSheltering",
 	43: "MsgSaucrShelteringResp",
+	46: "MsgDRSync",
 }
 
 var MessageType_value = map[string]int32{
@@ -158,6 +160,7 @@ var MessageType_value = map[string]int32{
 	"MsgSaucrNormalResp":     41,
 	"MsgSaucrSheltering":     42,
 	"MsgSaucrShelteringResp": 43,
+	"MsgDRSync":              46,
 }
 
 func (x MessageType) Enum() *MessageType {
