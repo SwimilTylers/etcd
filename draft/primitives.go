@@ -12,9 +12,9 @@ type Update struct {
 
 	ZeroDelta bool
 
-	Entries []raftpb.Entry
-	VoteMsg *raftpb.Message
-	Err     error
+	Collected Collector
+	VoteMsg   *raftpb.Message
+	Err       error
 }
 
 func errUpdate(file string, err error) *Update {
@@ -31,12 +31,12 @@ func noUpdate(file string) *Update {
 	}
 }
 
-func newUpdate(file string, term uint64, entries []raftpb.Entry, vote *raftpb.Message) *Update {
+func newUpdate(file string, term uint64, c Collector, vote *raftpb.Message) *Update {
 	return &Update{
 		SourceFile: file,
 		Term:       term,
 		ZeroDelta:  false,
-		Entries:    entries,
+		Collected:  c,
 		VoteMsg:    vote,
 	}
 }
@@ -69,7 +69,7 @@ type PrimitiveProvider struct {
 	}
 	writer map[string]IMFWriter
 
-	cGet CollectorFactory
+	cPool CollectorPool
 }
 
 func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Message, c chan<- bool) error {
@@ -89,14 +89,15 @@ func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Mess
 }
 
 func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update) error {
-	if _, ok := pvd.reader[filepath.Join(rack, file)]; !ok {
+	signature := filepath.Join(rack, file)
+	if _, ok := pvd.reader[signature]; !ok {
 		return os.ErrNotExist
 	}
 
 	go func(c chan<- *Update, cl Collector) {
 		cl.Refresh()
 		c <- pvd.getUpdate(rack, file, cl)
-	}(c, pvd.cGet.GetCollector(rack, file))
+	}(c, pvd.cPool.RefreshAndGet(signature))
 
 	return nil
 }
@@ -110,7 +111,7 @@ func (pvd *PrimitiveProvider) Write(rack, file string, message *raftpb.Message) 
 }
 
 func (pvd *PrimitiveProvider) GetUpdate(rack, file string) *Update {
-	var c = pvd.cGet.GetCollector(rack, file)
+	var c = pvd.cPool.RefreshAndGet(filepath.Join(rack, file))
 	c.Refresh()
 	return pvd.getUpdate(rack, file, c)
 }
@@ -125,6 +126,10 @@ func (pvd *PrimitiveProvider) getUpdate(rack, file string, c Collector) *Update 
 		}
 
 		for _, m := range messages {
+			if m.Type != raftpb.MsgApp && m.Type != raftpb.MsgHeartbeat {
+				continue
+			}
+
 			c.AddEntries(m.Entries, m.LogTerm, m.Index)
 		}
 
@@ -135,9 +140,7 @@ func (pvd *PrimitiveProvider) getUpdate(rack, file string, c Collector) *Update 
 			vote = &last
 		}
 
-		ent, _, _ := c.DropAllEntries()
-
-		return newUpdate(file, last.Term, ent, vote)
+		return newUpdate(file, last.Term, c, vote)
 	}
 
 	return errUpdate(file, os.ErrNotExist)

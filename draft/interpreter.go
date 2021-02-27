@@ -1,6 +1,7 @@
 package draft
 
 import (
+	"errors"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 )
@@ -237,9 +238,14 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 		return err
 	}
 
-	if err := an.Offer(m.Term, m.From, m.Entries); err != nil {
-		itp.lg.Warn("analyzer refuse the local offer", zap.Error(err))
-		return err
+	if ok := an.TryOfferEntries(m.Term, m.From, m.LogTerm, m.Index, m.Entries); !ok {
+		itp.lg.Warn("analyzer refuse the local offer",
+			zap.Uint64("term", m.Term),
+			zap.Uint64("from", m.From),
+			zap.Uint64("log-term", m.LogTerm),
+			zap.Uint64("log-index", m.Index),
+		)
+		return errors.New("raft kernel is inconsistent to rack progress tracker")
 	}
 
 	_, _ = an.Progress()
@@ -269,7 +275,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 			)
 		} else if !update.ZeroDelta {
 			zeroDelta = false
-			_ = an.Offer(update.Term, itp.f2p[update.SourceFile], update.Entries)
+			_ = an.TryOfferCollector(update.Term, itp.f2p[update.SourceFile], update.Collected)
 			if update.VoteMsg != nil {
 				itp.lg.Info("detect another competitor", zap.String("source", update.SourceFile))
 				if vote == nil || vote.Term < update.VoteMsg.Term {
@@ -298,8 +304,8 @@ func grantVote(vote *raftpb.Message) *raftpb.Message {
 }
 
 func grantApp(app *raftpb.Message, an RackProgressAnalyzer) *raftpb.Message {
-	logTerm, logIndex, _ := an.Tell(app.LogTerm, app.Index)
-	if logTerm == app.LogTerm && logIndex == app.Index {
+	ok, logTerm, logIndex := an.MatchEntryPrefix(app.LogTerm, app.Index)
+	if ok {
 		return &raftpb.Message{
 			Type:   raftpb.MsgAppResp,
 			To:     app.From,

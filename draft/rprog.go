@@ -25,10 +25,73 @@ type RackProgressAnalyzer interface {
 	// This operation triggers the analysis and clears out buffer.
 	Progress() (*RackProgressDescriptor, error)
 
-	//Offer buffers new entries to RackProgressAnalyzer for analysis.
-	Offer(term uint64, holder uint64, ent []raftpb.Entry) error
+	//TryOfferCollector buffers Collector to RackProgressAnalyzer for analysis.
+	// If analyzer does not accept the offer, return false.
+	TryOfferCollector(term, termHolder uint64, c Collector) bool
 
-	//Tell asks RackProgressAnalyzer the compatible log record metadata.
+	//TryOfferEntries buffers new entries to RackProgressAnalyzer for analysis.
+	// If analyzer does not accept the offer, return false.
+	TryOfferEntries(term, termHolder uint64, logTerm, logIndex uint64, ent []raftpb.Entry) bool
+
+	//MatchEntryPrefix asks RackProgressAnalyzer the compatible log record metadata.
+	// If 'logTerm' and 'logIndex' match the record, return true.
+	// Otherwise, return false as well as matchedLogTerm and matchedLogIndex.
+	// Here, matchedLogTerm = max {term|term<=logTerm},
+	// matchedLogIndex = max {entry.index|entry.term == matchedLogTerm}
 	// This operation triggers the analysis but will not clear out buffer.
-	Tell(logTerm, logIndex uint64) (uint64, uint64, error)
+	MatchEntryPrefix(logTerm, logIndex uint64) (bool, uint64, uint64)
+}
+
+type CollectorAnalyzer struct {
+	Collector
+
+	term    uint64
+	tHolder uint64
+	commit  uint64
+
+	eRange []struct{ startIdx, term uint64 }
+}
+
+func (ca *CollectorAnalyzer) InitAs(d *RackProgressDescriptor) {
+	ca.Refresh()
+
+	ca.term = d.Term
+	ca.tHolder = d.TermHolder
+	ca.commit = d.Commit
+	ca.eRange = make([]struct{ startIdx, term uint64 }, 0, 10)
+
+	ca.AddEntries(d.Entries, d.LogTerm, d.LogIndex)
+}
+
+func (ca *CollectorAnalyzer) Progress() (*RackProgressDescriptor, error) {
+	panic("implement me")
+}
+
+func (ca *CollectorAnalyzer) TryOfferCollector(term, termHolder uint64, c Collector) bool {
+	if term < ca.term {
+		return false
+	}
+
+	if term > ca.term {
+		ca.term = term
+		ca.tHolder = termHolder
+	}
+
+	if ca.tHolder != termHolder {
+		return false
+	}
+
+	panic("")
+}
+
+func (ca *CollectorAnalyzer) TryOfferEntries(term, termHolder uint64, logTerm, logIndex uint64, ent []raftpb.Entry) bool {
+	panic("implement me")
+}
+
+func (ca *CollectorAnalyzer) MatchEntryPrefix(logTerm, logIndex uint64) (bool, uint64, uint64) {
+	panic("implement me")
+}
+
+func (ca *CollectorAnalyzer) refreshERange(logTerm, logIndex uint64, ent []raftpb.Entry) {
+
 }
