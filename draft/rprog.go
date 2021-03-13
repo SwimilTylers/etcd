@@ -27,11 +27,11 @@ type RackProgressAnalyzer interface {
 
 	//TryOfferCollector buffers Collector to RackProgressAnalyzer for analysis.
 	// If analyzer does not accept the offer, return false.
-	TryOfferCollector(term, termHolder uint64, c Collector) bool
+	TryOfferCollector(term, termHolder, latestCommit uint64, c Collector) bool
 
 	//TryOfferEntries buffers new entries to RackProgressAnalyzer for analysis.
 	// If analyzer does not accept the offer, return false.
-	TryOfferEntries(term, termHolder uint64, logTerm, logIndex uint64, ent []raftpb.Entry) bool
+	TryOfferEntries(term, termHolder, latestCommit, logTerm, logIndex uint64, ent []raftpb.Entry) bool
 
 	//MatchEntryPrefix asks RackProgressAnalyzer the compatible log record metadata.
 	// If 'logTerm' and 'logIndex' match the record, return true.
@@ -43,55 +43,180 @@ type RackProgressAnalyzer interface {
 }
 
 type CollectorAnalyzer struct {
-	Collector
+	majorSeq    Collector
+	minorSeq    []Collector
+	minorCommit []uint64
+
+	cachedMajorTable []*CollectorBriefSegment
 
 	term    uint64
 	tHolder uint64
 	commit  uint64
 
-	eRange []struct{ startIdx, term uint64 }
+	modified bool
+}
+
+func NewCollectorAnalyzer(majorSeq Collector, minorFirstSeq Collector) *CollectorAnalyzer {
+	minorSeq := make([]Collector, 1, 3)
+	minorSeq[0] = minorFirstSeq
+	return &CollectorAnalyzer{majorSeq: majorSeq, minorSeq: minorSeq, modified: false}
 }
 
 func (ca *CollectorAnalyzer) InitAs(d *RackProgressDescriptor) {
-	ca.Refresh()
+	ca.refreshCollectors()
+	ca.destroyCachedMajorTable()
 
 	ca.term = d.Term
 	ca.tHolder = d.TermHolder
 	ca.commit = d.Commit
-	ca.eRange = make([]struct{ startIdx, term uint64 }, 0, 10)
 
-	ca.AddEntries(d.Entries, d.LogTerm, d.LogIndex)
+	ca.majorSeq.AddEntries(d.Entries, d.LogTerm, d.LogIndex)
+
+	ca.modified = true
 }
 
 func (ca *CollectorAnalyzer) Progress() (*RackProgressDescriptor, error) {
-	panic("implement me")
+	if !ca.modified {
+		return noProgress(), nil
+	}
+
+	ca.upgrade()
+	_, ent, lt, li := ca.majorSeq.FetchAllEntries()
+	ca.majorSeq.Refresh()
+
+	ca.modified = false
+
+	return newProgress(ca.term, ca.tHolder, ca.commit, lt, li, ent), nil
 }
 
-func (ca *CollectorAnalyzer) TryOfferCollector(term, termHolder uint64, c Collector) bool {
-	if term < ca.term {
+func (ca *CollectorAnalyzer) TryOfferCollector(term, termHolder, latestCommit uint64, c Collector) bool {
+	if !ca.isLegalOffer(latestCommit, term) {
 		return false
 	}
+
+	ca.modified = true
+	ca.destroyCachedMajorTable()
 
 	if term > ca.term {
 		ca.term = term
 		ca.tHolder = termHolder
 	}
 
-	if ca.tHolder != termHolder {
+	ca.minorSeq = append(ca.minorSeq, c)
+	ca.minorCommit = append(ca.minorCommit, latestCommit)
+	return true
+}
+
+func (ca *CollectorAnalyzer) TryOfferEntries(term, termHolder, latestCommit, logTerm, logIndex uint64, ent []raftpb.Entry) bool {
+	if !ca.isLegalOffer(latestCommit, term) {
 		return false
 	}
 
-	panic("")
-}
+	ca.modified = true
+	ca.destroyCachedMajorTable()
 
-func (ca *CollectorAnalyzer) TryOfferEntries(term, termHolder uint64, logTerm, logIndex uint64, ent []raftpb.Entry) bool {
-	panic("implement me")
+	if term > ca.term {
+		ca.term = term
+		ca.tHolder = termHolder
+	}
+
+	ca.minorSeq[0].AddEntries(ent, logTerm, logIndex)
+	ca.minorCommit[0] = latestCommit
+	return true
 }
 
 func (ca *CollectorAnalyzer) MatchEntryPrefix(logTerm, logIndex uint64) (bool, uint64, uint64) {
-	panic("implement me")
+	if !ca.modified {
+		if ca.cachedMajorTable == nil {
+			ca.upgrade()
+		}
+		return ca.locateCacheWithPrefix(logTerm, logIndex)
+	}
+
+	ca.upgrade()
+	return ca.locateCacheWithPrefix(logTerm, logIndex)
 }
 
-func (ca *CollectorAnalyzer) refreshERange(logTerm, logIndex uint64, ent []raftpb.Entry) {
+func (ca *CollectorAnalyzer) refreshCollectors() {
+	ca.majorSeq.Refresh()
+	ca.minorSeq = ca.minorSeq[:1]
+	ca.minorCommit = ca.minorCommit[:1]
+	ca.minorSeq[0].Refresh()
+}
 
+func (ca *CollectorAnalyzer) destroyCachedMajorTable() {
+	if ca.cachedMajorTable == nil {
+		return
+	}
+
+	ca.cachedMajorTable = ca.cachedMajorTable[:0]
+}
+
+func (ca *CollectorAnalyzer) upgrade() {
+	ca.majorSeq.Refresh()
+	ca.mergeMinorIntoMajor()
+	_, ca.cachedMajorTable = ca.majorSeq.Briefing()
+}
+
+func (ca *CollectorAnalyzer) mergeMinorIntoMajor() {
+	// merge the first minor collector
+	if !ca.minorSeq[0].IsEmpty() {
+		if ok, ent, lt, li := ca.minorSeq[0].FetchAllEntries(); ok {
+			ca.majorSeq.AddEntries(ent, lt, li)
+		}
+		ca.commit = ca.minorCommit[0]
+	}
+
+	// merge the other minor collectors
+	var cc = ca.majorSeq.(*ConsecutiveEntryCollector)
+	var fc []*EntryFragmentCollector
+	for i, c := range ca.minorSeq {
+		if i == 0 {
+			// skip the first minor collector
+			continue
+		}
+
+		if c.IsEmpty() {
+			// skip empty collector
+			continue
+		}
+
+		if fcc, ok := c.(*EntryFragmentCollector); ok {
+			fc = append(fc, fcc)
+		}
+	}
+
+	// merge fragments
+	MergeEntryFragments(ca.commit, fc, cc)
+
+	// merge commit index
+	for _, commit := range ca.minorCommit {
+		if commit > ca.commit {
+			ca.commit = commit
+		}
+	}
+}
+
+func (ca *CollectorAnalyzer) locateCacheWithPrefix(logTerm, logIndex uint64) (bool, uint64, uint64) {
+	return false, 0, 0
+}
+
+func (ca *CollectorAnalyzer) isLegalOffer(commit, term uint64) bool {
+	return term >= ca.term && commit >= ca.commit
+}
+
+func noProgress() *RackProgressDescriptor {
+	return &RackProgressDescriptor{NoProgress: true}
+}
+
+func newProgress(term, tHolder, commit, logTerm, logIndex uint64, ent []raftpb.Entry) *RackProgressDescriptor {
+	return &RackProgressDescriptor{
+		NoProgress: false,
+		Term:       term,
+		TermHolder: tHolder,
+		LogTerm:    logTerm,
+		LogIndex:   logIndex,
+		Commit:     commit,
+		Entries:    ent,
+	}
 }

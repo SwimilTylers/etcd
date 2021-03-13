@@ -62,14 +62,21 @@ type Primitives interface {
 	AsyncPrimitives
 }
 
-type PrimitiveProvider struct {
-	reader map[string]struct {
-		next   int
-		reader IMFReader
-	}
-	writer map[string]IMFWriter
+type updater struct {
+	next   int
+	reader IMFReader
+}
 
-	cPool CollectorPool
+func (u *updater) RecentIMF() []raftpb.Message {
+	messages := u.reader.ReadIMF(u.next)
+	u.next += len(messages)
+	return messages
+}
+
+type PrimitiveProvider struct {
+	reader    map[string]*updater
+	writer    map[string]IMFWriter
+	collector map[string]Collector
 }
 
 func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Message, c chan<- bool) error {
@@ -90,16 +97,18 @@ func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Mess
 
 func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update) error {
 	signature := filepath.Join(rack, file)
-	if _, ok := pvd.reader[signature]; !ok {
-		return os.ErrNotExist
+	if r, ok := pvd.reader[signature]; ok {
+		collector := pvd.collector[signature]
+
+		go func(c chan<- *Update, f string, u *updater, cl Collector) {
+			cl.Refresh()
+			c <- pvd.getUpdate(f, u, cl)
+		}(c, file, r, collector)
+
+		return nil
 	}
 
-	go func(c chan<- *Update, cl Collector) {
-		cl.Refresh()
-		c <- pvd.getUpdate(rack, file, cl)
-	}(c, pvd.cPool.RefreshAndGet(signature))
-
-	return nil
+	return os.ErrNotExist
 }
 
 func (pvd *PrimitiveProvider) Write(rack, file string, message *raftpb.Message) error {
@@ -111,37 +120,36 @@ func (pvd *PrimitiveProvider) Write(rack, file string, message *raftpb.Message) 
 }
 
 func (pvd *PrimitiveProvider) GetUpdate(rack, file string) *Update {
-	var c = pvd.cPool.RefreshAndGet(filepath.Join(rack, file))
-	c.Refresh()
-	return pvd.getUpdate(rack, file, c)
-}
-
-func (pvd *PrimitiveProvider) getUpdate(rack, file string, c Collector) *Update {
 	if r, ok := pvd.reader[filepath.Join(rack, file)]; ok {
-		messages := r.reader.ReadIMF(r.next)
-		r.next += len(messages)
-
-		if len(messages) == 0 {
-			return noUpdate(file)
-		}
-
-		for _, m := range messages {
-			if m.Type != raftpb.MsgApp && m.Type != raftpb.MsgHeartbeat {
-				continue
-			}
-
-			c.AddEntries(m.Entries, m.LogTerm, m.Index)
-		}
-
-		last := messages[len(messages)-1]
-		var vote *raftpb.Message = nil
-
-		if last.Type == raftpb.MsgVote {
-			vote = &last
-		}
-
-		return newUpdate(file, last.Term, c, vote)
+		var c = pvd.collector[filepath.Join(rack, file)]
+		c.Refresh()
+		return pvd.getUpdate(file, r, c)
 	}
 
 	return errUpdate(file, os.ErrNotExist)
+}
+
+func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c Collector) *Update {
+	messages := r.RecentIMF()
+
+	if len(messages) == 0 {
+		return noUpdate(file)
+	}
+
+	for _, m := range messages {
+		if m.Type != raftpb.MsgApp && m.Type != raftpb.MsgHeartbeat {
+			continue
+		}
+
+		c.AddEntries(m.Entries, m.LogTerm, m.Index)
+	}
+
+	last := messages[len(messages)-1]
+	var vote *raftpb.Message = nil
+
+	if last.Type == raftpb.MsgVote {
+		vote = &last
+	}
+
+	return newUpdate(file, last.Term, c, vote)
 }

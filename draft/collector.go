@@ -1,6 +1,8 @@
 package draft
 
-import "go.etcd.io/etcd/raft/raftpb"
+import (
+	"go.etcd.io/etcd/raft/raftpb"
+)
 
 type CollectorBriefSegment struct {
 	Term        uint64
@@ -9,39 +11,58 @@ type CollectorBriefSegment struct {
 	LastIndex   uint64
 }
 
+func CombineCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
+	return nil
+}
+
 //Collector works for Entry Appending and Conflict Resolution
 type Collector interface {
-	//AddEntries collects entries and resolve potential conflict.
+	//AddEntries collects entries and resolve potential conflict. This might cause
+	// the truncation of internal entry array. Return true if failed to attach new entries.
 	AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool
 
+	//FetchEntries fetches all the entries with the request term, as well as their
+	// previous logTerm and logIndex.
 	FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64)
+
+	FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64)
+
+	FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64)
 
 	//Refresh removes all internal status.
 	Refresh()
 
+	//Briefing makes a brief report on Collector.
 	Briefing() (bool, []*CollectorBriefSegment)
+
+	//IsEmpty checks if the Collector is empty
+	IsEmpty() bool
 }
 
-//LightWeightCollector is an implementation of Collector. It can be viewed as an enhanced Entry array, which is
-// designed for facilitating append-ops, while taking more time to resolve conflicts.
-//
-//This collector is recommended for collecting entries from a single source.
-// As for this collector, DropAllEntries works the same as Refresh. Do mention this point.
-type LightWeightCollector struct {
+//ConsecutiveEntryCollector is an implementation of Collector. It maintains an entry array
+// with consecutive indices.
+type ConsecutiveEntryCollector struct {
 	logTerm   uint64
 	logIndex  uint64
 	nextIndex uint64
 
 	copied  bool
 	content []raftpb.Entry
+
+	cachedTable []struct {
+		term        uint64
+		first, last int
+	}
 }
 
-func (c *LightWeightCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
-	return c.addEntries(entries, logTerm, logIndex)
+func (c *ConsecutiveEntryCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
+	c.destroyCachedTable()
+	success, _ := c.addEntries(entries, logTerm, logIndex)
+	return success
 }
 
-func (c *LightWeightCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.content == nil {
+func (c *ConsecutiveEntryCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
+	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
 
@@ -65,16 +86,43 @@ func (c *LightWeightCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, 
 	return true, c.content[left : right+1], last.Term, last.Index
 }
 
-func (c *LightWeightCollector) Refresh() {
+func (c *ConsecutiveEntryCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
+	if c.IsEmpty() {
+		return false, nil, 0, 0
+	}
+
+	if index <= c.logIndex+1 {
+		return true, c.content, c.logTerm, c.logIndex
+	}
+
+	if index >= c.nextIndex {
+		return false, nil, 0, 0
+	}
+
+	_, idx := c.locateEntryWithLogIndex(index - 1)
+	before := &c.content[idx-1]
+	return true, c.content[idx:], before.Term, before.Index
+}
+
+func (c *ConsecutiveEntryCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
+	if c.IsEmpty() {
+		return false, nil, 0, 0
+	}
+
+	return true, c.content, c.logTerm, c.logIndex
+}
+
+func (c *ConsecutiveEntryCollector) Refresh() {
 	if c.content == nil {
 		return
 	}
 
 	c.content = nil
 	c.copied = false
+	c.destroyCachedTable()
 }
 
-func (c *LightWeightCollector) Briefing() (bool, []*CollectorBriefSegment) {
+func (c *ConsecutiveEntryCollector) Briefing() (bool, []*CollectorBriefSegment) {
 	if c.content == nil {
 		return false, nil
 	}
@@ -83,6 +131,10 @@ func (c *LightWeightCollector) Briefing() (bool, []*CollectorBriefSegment) {
 	left := 0
 	logTerm := c.logTerm
 	cLen := len(c.content)
+
+	c.destroyCachedTable()
+	ct := c.cachedTable
+	c.cachedTable = nil
 
 	for left < cLen {
 		term := c.content[left].Term
@@ -93,14 +145,40 @@ func (c *LightWeightCollector) Briefing() (bool, []*CollectorBriefSegment) {
 			FirstIndex:  c.content[left].Index,
 			LastIndex:   c.content[right].Index,
 		})
+		ct = append(ct, struct {
+			term        uint64
+			first, last int
+		}{term: term, first: left, last: right})
 		logTerm = term
 		left = right + 1
 	}
 
+	c.cachedTable = ct
+
 	return true, result
 }
 
-func (c *LightWeightCollector) init(entries []raftpb.Entry, logTerm, logIndex uint64) {
+func (c *ConsecutiveEntryCollector) IsEmpty() bool {
+	return c.content == nil
+}
+
+func (c *ConsecutiveEntryCollector) EntrySize() int {
+	if c.IsEmpty() {
+		return 0
+	}
+
+	return len(c.content)
+}
+
+func (c *ConsecutiveEntryCollector) GetLatestTerm() (bool, uint64) {
+	if c.IsEmpty() {
+		return false, 0
+	}
+
+	return true, c.content[len(c.content)-1].Term
+}
+
+func (c *ConsecutiveEntryCollector) init(entries []raftpb.Entry, logTerm, logIndex uint64) {
 	c.copied = false
 	c.content = entries
 	c.logTerm = logTerm
@@ -108,34 +186,37 @@ func (c *LightWeightCollector) init(entries []raftpb.Entry, logTerm, logIndex ui
 	c.nextIndex = logIndex + uint64(len(entries)) + 1
 }
 
-func (c *LightWeightCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) bool {
+func (c *ConsecutiveEntryCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, bool) {
 	if c.content == nil || logIndex <= c.logIndex {
 		c.init(entries, logTerm, logIndex)
-		return true
+		return true, false
 	}
 
 	if logIndex >= c.nextIndex {
-		return false
+		return false, false
 	}
 
 	var oldLen = len(c.content)
+	var truncated = false
 
 	if !c.checkIfAppendable(logTerm, logIndex) {
-		oldLen = c.rmvEntries(logTerm, logIndex)
+		checkLen := c.rmvEntries(logTerm, logIndex)
+		truncated = checkLen != oldLen
 		if !c.checkIfAppendable(logTerm, logIndex) {
-			return false
+			return false, truncated
 		}
+		oldLen = checkLen
 	}
 
 	var newLen = len(entries)
 
 	if oldLen == 0 {
 		c.init(entries, logTerm, logIndex)
-		return true
+		return true, truncated
 	}
 
 	if newLen == 0 {
-		return true
+		return true, truncated
 	}
 
 	if !c.copied {
@@ -150,10 +231,10 @@ func (c *LightWeightCollector) addEntries(entries []raftpb.Entry, logTerm, logIn
 
 	c.nextIndex = entries[newLen-1].Index
 
-	return true
+	return true, truncated
 }
 
-func (c *LightWeightCollector) rmvEntries(logTerm, logIndex uint64) int {
+func (c *ConsecutiveEntryCollector) rmvEntries(logTerm, logIndex uint64) int {
 	if len(c.content) == 0 {
 		return 0
 	}
@@ -170,7 +251,25 @@ func (c *LightWeightCollector) rmvEntries(logTerm, logIndex uint64) int {
 			return c.resize(idx, logTerm, logIndex)
 		}
 
-		_, idx = c.locateFirstEntryWithTerm(c.content[idx].Term, 0, idx+1)
+		term := c.content[idx].Term
+		_, idx = c.locateFirstEntryWithTerm(term, 0, idx+1)
+
+		if idx == 0 {
+			return c.resize(0, logTerm, logIndex)
+		}
+
+		idx--
+		term = c.content[idx].Term
+
+		for term > logTerm {
+			_, idx = c.locateFirstEntryWithTerm(term, 0, idx+1)
+			if idx == 0 {
+				break
+			}
+			idx--
+			term = c.content[idx].Term
+		}
+
 		return c.resize(idx, logTerm, logIndex)
 	}
 
@@ -181,7 +280,7 @@ func (c *LightWeightCollector) rmvEntries(logTerm, logIndex uint64) int {
 	return len(c.content)
 }
 
-func (c *LightWeightCollector) resize(length int, logTerm, logIndex uint64) int {
+func (c *ConsecutiveEntryCollector) resize(length int, logTerm, logIndex uint64) int {
 	if length >= len(c.content) {
 		return len(c.content)
 	}
@@ -204,12 +303,16 @@ func (c *LightWeightCollector) resize(length int, logTerm, logIndex uint64) int 
 	return length
 }
 
-func (c *LightWeightCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
+func (c *ConsecutiveEntryCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
 	rel := int(logIndex - c.logIndex - 1)
 	return rel >= 0 && rel < len(c.content), rel
 }
 
-func (c *LightWeightCollector) locateEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *ConsecutiveEntryCollector) locateEntryWithTerm(term uint64, from, to int) (bool, int) {
+	if ok, l, _ := c.locateCachedTableWithTerm(term, from, to); ok {
+		return true, l
+	}
+
 	start := from
 	end := to
 
@@ -228,7 +331,11 @@ func (c *LightWeightCollector) locateEntryWithTerm(term uint64, from, to int) (b
 	return false, start
 }
 
-func (c *LightWeightCollector) locateFirstEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *ConsecutiveEntryCollector) locateFirstEntryWithTerm(term uint64, from, to int) (bool, int) {
+	if ok, l, _ := c.locateCachedTableWithTerm(term, from, to); ok {
+		return true, l
+	}
+
 	start := from
 	end := to
 
@@ -250,7 +357,11 @@ func (c *LightWeightCollector) locateFirstEntryWithTerm(term uint64, from, to in
 	return false, start
 }
 
-func (c *LightWeightCollector) locateLastEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *ConsecutiveEntryCollector) locateLastEntryWithTerm(term uint64, from, to int) (bool, int) {
+	if ok, _, r := c.locateCachedTableWithTerm(term, from, to); ok {
+		return true, r
+	}
+
 	start := from
 	end := to
 
@@ -272,7 +383,53 @@ func (c *LightWeightCollector) locateLastEntryWithTerm(term uint64, from, to int
 	return false, start
 }
 
-func (c *LightWeightCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
+func (c *ConsecutiveEntryCollector) destroyCachedTable() {
+	if c.cachedTable == nil {
+		return
+	}
+	c.cachedTable = c.cachedTable[:0]
+}
+
+func (c *ConsecutiveEntryCollector) locateCachedTableWithTerm(term uint64, from, to int) (bool, int, int) {
+	if len(c.cachedTable) == 0 {
+		return false, 0, 0
+	}
+
+	start := 0
+	end := len(c.cachedTable)
+
+	for start < end {
+		mid := (start + end) / 2
+		mt := c.cachedTable[mid].term
+
+		if mt == term {
+			left := c.cachedTable[mid].first
+			right := c.cachedTable[mid].last
+
+			if left >= to || right < from {
+				return false, 0, 0
+			}
+
+			if left < from {
+				left = from
+			}
+
+			if right > to-1 {
+				right = to - 1
+			}
+
+			return true, left, right
+		} else if mt < term {
+			start = mid + 1
+		} else {
+			end = mid
+		}
+	}
+
+	return false, 0, 0
+}
+
+func (c *ConsecutiveEntryCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
 	if len(c.content) == 0 {
 		return true
 	}
@@ -284,49 +441,48 @@ func (c *LightWeightCollector) checkIfAppendable(logTerm, logIndex uint64) bool 
 	return false
 }
 
-type subCollector struct {
-	Collector
+type EntryFragment struct {
+	logTerm  uint64
+	logIndex uint64
 
-	brief []*CollectorBriefSegment
+	fragment []raftpb.Entry
 
-	next *subCollector
+	latestTerm uint64
 }
 
-//HeavyWeightCollector is an implementation of Collector. It can be viewed as a linked list with some basic information,
-// which is designed for resolving conflicts between several long entry arrays.
-//
-//This collector is recommended for combining entry arrays from different sources.
-type HeavyWeightCollector struct {
+type subCollector struct {
+	*ConsecutiveEntryCollector
+	brief []*CollectorBriefSegment
+	prev  *subCollector
+	next  *subCollector
+}
+
+//EntryFragmentCollector is an implementation of Collector. It maintains a Collector array which allows
+// the combination of several disjoint entry fragments.
+type EntryFragmentCollector struct {
 	head *subCollector
 	tail *subCollector
+
+	regularized   bool
+	defaultRegOpt bool
 }
 
-func (c *HeavyWeightCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
-	if c.head == nil {
-		c.attachNewSubCollector()
-	}
-
-	c.tail.brief = nil
-
-	if ok := c.tail.AddEntries(entries, logTerm, logIndex); !ok {
-		c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+func (c *EntryFragmentCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
+	if c.regularized {
+		c.regularizedAddEntries(entries, logTerm, logIndex)
+	} else {
+		c.addEntries(entries, logTerm, logIndex)
 	}
 
 	return true
 }
 
-func (c *HeavyWeightCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.head == nil {
+func (c *EntryFragmentCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
+	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
 
-	if c.head.brief == nil {
-		var ok bool
-		ok, c.head.brief = c.head.Briefing()
-		if !ok {
-			return false, nil, 0, 0
-		}
-	}
+	c.regularize()
 
 	if sub := c.locateEntries(term); sub != nil {
 		return sub.FetchEntries(term)
@@ -335,18 +491,44 @@ func (c *HeavyWeightCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, 
 	return false, nil, 0, 0
 }
 
-func (c *HeavyWeightCollector) Refresh() {
+func (c *EntryFragmentCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
+	if c.IsEmpty() {
+		return false, nil, 0, 0
+	}
+
+	c.regularize()
+
+	_, e, t, i := c.head.FetchEntriesWithStartIndex(index)
+
+	return c.head.next == nil, e, t, i
+}
+
+func (c *EntryFragmentCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
+	if c.IsEmpty() {
+		return false, nil, 0, 0
+	}
+
+	c.regularize()
+
+	_, e, t, i := c.head.FetchAllEntries()
+
+	return c.head.next == nil, e, t, i
+}
+
+func (c *EntryFragmentCollector) Refresh() {
 	if c.head == nil {
 		return
 	}
 	c.head.brief = nil
 	c.head.Refresh()
 	if c.head.next != nil {
+		c.head.next.prev = nil
 		c.head.next = nil
 	}
+	c.regularized = c.defaultRegOpt
 }
 
-func (c *HeavyWeightCollector) Briefing() (bool, []*CollectorBriefSegment) {
+func (c *EntryFragmentCollector) Briefing() (bool, []*CollectorBriefSegment) {
 	if c.head == nil {
 		return false, nil
 	}
@@ -362,7 +544,70 @@ func (c *HeavyWeightCollector) Briefing() (bool, []*CollectorBriefSegment) {
 	return true, c.briefing()
 }
 
-func (c *HeavyWeightCollector) briefing() []*CollectorBriefSegment {
+func (c *EntryFragmentCollector) IsEmpty() bool {
+	return c.head == nil || c.head.IsEmpty()
+}
+
+func (c *EntryFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
+	if c.IsEmpty() {
+		return false, nil
+	}
+
+	c.regularize()
+
+	frag := c.fetchFragments(index)
+
+	if len(frag) == 0 {
+		return false, nil
+	}
+
+	return true, frag
+}
+
+func (c *EntryFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
+	if c.IsEmpty() {
+		return false, nil
+	}
+
+	c.regularize()
+
+	return true, c.fetchFragments(0)
+}
+
+func (c *EntryFragmentCollector) fetchFragments(index uint64) []*EntryFragment {
+	var result []*EntryFragment
+	needle := c.head
+
+	meet := false
+
+	for needle != nil {
+		if !meet {
+			if ok, ent, logTerm, logIndex := needle.FetchEntriesWithStartIndex(index); ok {
+				meet = true
+				result = append(result, &EntryFragment{
+					logTerm:    logTerm,
+					logIndex:   logIndex,
+					fragment:   ent,
+					latestTerm: ent[len(ent)-1].Term,
+				})
+			}
+		} else {
+			_, ent, logTerm, logIndex := needle.FetchAllEntries()
+			meet = true
+			result = append(result, &EntryFragment{
+				logTerm:    logTerm,
+				logIndex:   logIndex,
+				fragment:   ent,
+				latestTerm: ent[len(ent)-1].Term,
+			})
+		}
+		needle = needle.next
+	}
+
+	return result
+}
+
+func (c *EntryFragmentCollector) briefing() []*CollectorBriefSegment {
 	var result []*CollectorBriefSegment
 
 	needle := c.head
@@ -377,7 +622,7 @@ func (c *HeavyWeightCollector) briefing() []*CollectorBriefSegment {
 	return result
 }
 
-func (c *HeavyWeightCollector) locateEntries(term uint64) Collector {
+func (c *EntryFragmentCollector) locateEntries(term uint64) Collector {
 	needle := c.head
 	for needle != nil {
 		if needle.brief == nil {
@@ -408,20 +653,77 @@ func (c *HeavyWeightCollector) locateEntries(term uint64) Collector {
 	return nil
 }
 
-func (c *HeavyWeightCollector) attachNewSubCollector() Collector {
+func (c *EntryFragmentCollector) attachNewSubCollector() Collector {
 	if c.head == nil {
-		c.head = &subCollector{Collector: &LightWeightCollector{}}
+		c.head = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}}
 		c.tail = c.head
 	} else {
-		c.tail.next = &subCollector{Collector: &LightWeightCollector{}}
+		c.tail.next = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}, prev: c.tail}
 		c.tail = c.tail.next
 	}
 
 	return c.tail
 }
 
-type CollectorPool interface {
-	RefreshAndGet(key string) Collector
-	Get(key string) Collector
-	Set(key string, c Collector)
+func (c *EntryFragmentCollector) regularizedAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
+	if c.head == nil {
+		c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+		return
+	}
+
+	needle := c.head
+
+	for needle != nil {
+		if ok, _ := needle.addEntries(entries, logTerm, logIndex); ok {
+			next := needle.next
+			if next != nil {
+				next.prev = nil
+			}
+			needle.next = nil
+			return
+		}
+		needle = needle.next
+	}
+
+	c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+}
+
+func (c *EntryFragmentCollector) addEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
+	if c.head == nil {
+		c.attachNewSubCollector()
+	}
+
+	c.tail.brief = nil
+
+	if ok := c.tail.AddEntries(entries, logTerm, logIndex); !ok {
+		c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+	}
+}
+
+func (c *EntryFragmentCollector) regularize() {
+	if c.regularized {
+		return
+	}
+
+	if c.head == nil || c.head.next == nil {
+		c.regularized = true
+		return
+	}
+
+	// clear out buffered brief
+
+	needle := c.head
+
+	for needle != nil {
+		if needle.brief == nil {
+			break
+		}
+		needle.brief = nil
+		needle = needle.next
+	}
+
+	//todo: regularization
+
+	c.regularized = true
+	panic("regularization not yet finished")
 }

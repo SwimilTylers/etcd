@@ -1,0 +1,63 @@
+package draft
+
+/**
+* merge: []*EntryFragmentCollector => *ConsecutiveEntryCollector
+ */
+
+// MergeEntryFragments
+func MergeEntryFragments(commit uint64, in []*EntryFragmentCollector, out *ConsecutiveEntryCollector) {
+	inLen := len(in)
+
+	if inLen == 0 {
+		return
+	}
+
+	fragments := make([][]*EntryFragment, 0, inLen)
+	fIndices := make([]int, 0, inLen)
+
+	_, initTerm := out.GetLatestTerm()
+
+	// filter out out-of-date fragments
+	for _, c := range in {
+		if ok, fragment := c.FetchFragmentsWithStartIndex(commit + 1); ok {
+			idx := -1
+			for j, f := range fragment {
+				if f.latestTerm >= initTerm {
+					idx = j
+				}
+			}
+			if idx != -1 {
+				fragments = append(fragments, fragment)
+				fIndices = append(fIndices, idx)
+			}
+		}
+	}
+
+	count := len(fragments)
+
+	// merging
+	for count > 0 {
+		min := 0
+		minTerm := fragments[0][fIndices[0]].latestTerm
+
+		for i := 1; i < inLen; i++ {
+			index := fIndices[i]
+			if index == len(fragments[i]) {
+				continue
+			}
+			term := fragments[i][index].latestTerm
+			if term < minTerm {
+				min = i
+				minTerm = term
+			}
+		}
+
+		f := fragments[min][fIndices[min]]
+		fIndices[min]++
+		if fIndices[min] == len(fragments[min]) {
+			count--
+		}
+
+		out.AddEntries(f.fragment, f.logTerm, f.logIndex)
+	}
+}

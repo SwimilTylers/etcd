@@ -44,6 +44,7 @@ func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
 			r.Type = raftpb.MsgHeartbeatResp
 			return r
 		}
+		break
 	case raftpb.MsgDRSync:
 		return itp.drSync()
 	}
@@ -238,9 +239,10 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 		return err
 	}
 
-	if ok := an.TryOfferEntries(m.Term, m.From, m.LogTerm, m.Index, m.Entries); !ok {
+	if ok := an.TryOfferEntries(m.Term, m.From, m.Commit, m.LogTerm, m.Index, m.Entries); !ok {
 		itp.lg.Warn("analyzer refuse the local offer",
 			zap.Uint64("term", m.Term),
+			zap.Uint64("commit", m.Commit),
 			zap.Uint64("from", m.From),
 			zap.Uint64("log-term", m.LogTerm),
 			zap.Uint64("log-index", m.Index),
@@ -248,6 +250,7 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 		return errors.New("raft kernel is inconsistent to rack progress tracker")
 	}
 
+	// avoid affect to the following steps
 	_, _ = an.Progress()
 
 	return nil
@@ -275,7 +278,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 			)
 		} else if !update.ZeroDelta {
 			zeroDelta = false
-			_ = an.TryOfferCollector(update.Term, itp.f2p[update.SourceFile], update.Collected)
+			_ = an.TryOfferCollector(update.Term, itp.f2p[update.SourceFile], 0, update.Collected)
 			if update.VoteMsg != nil {
 				itp.lg.Info("detect another competitor", zap.String("source", update.SourceFile))
 				if vote == nil || vote.Term < update.VoteMsg.Term {
