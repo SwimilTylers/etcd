@@ -11,6 +11,8 @@ type CollectorBriefSegment struct {
 	LastIndex   uint64
 }
 
+//CombineCollectorBriefSegment provides a lightweight approach for entry appending and
+// conflict resolution at the level of CollectorBriefSegment arrays.
 func CombineCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
 	return nil
 }
@@ -18,21 +20,25 @@ func CombineCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorB
 //Collector works for Entry Appending and Conflict Resolution
 type Collector interface {
 	//AddEntries collects entries and resolve potential conflict. This might cause
-	// the truncation of internal entry array. Return true if failed to attach new entries.
+	// the modification of internal structure. Return false if failed to attach new entries.
 	AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool
 
 	//FetchEntries fetches all the entries with the request term, as well as their
-	// previous logTerm and logIndex.
+	// previous logTerm and logIndex. Return false if no such an entry.
 	FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64)
 
-	FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64)
+	//FetchEntriesWithStartIndex fetches entries with index >= startIndex, as well as their
+	// previous logTerm and logIndex. Return false if no such an entry.
+	FetchEntriesWithStartIndex(startIndex uint64) (bool, []raftpb.Entry, uint64, uint64)
 
+	//FetchAllEntries fetches all entries from internal structure. Return false if it is empty.
 	FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64)
 
 	//Refresh removes all internal status.
 	Refresh()
 
-	//Briefing makes a brief report on Collector.
+	//Briefing makes a brief report on Collector. The report comprises of several segments, each of which
+	// describing the
 	Briefing() (bool, []*CollectorBriefSegment)
 
 	//IsEmpty checks if the Collector is empty
@@ -40,7 +46,10 @@ type Collector interface {
 }
 
 //ConsecutiveEntryCollector is an implementation of Collector. It maintains an entry array
-// with consecutive indices.
+// with consecutive indices. During the process of AddEntries, it might reinitialize the
+// internal array or truncate the internal array. If new entries are not appendable even
+// after those steps, the collector will not take in these entries for the maintenance of
+// consecutive-ness.
 type ConsecutiveEntryCollector struct {
 	logTerm   uint64
 	logIndex  uint64
@@ -53,6 +62,10 @@ type ConsecutiveEntryCollector struct {
 		term        uint64
 		first, last int
 	}
+}
+
+func NewConsecutiveEntryCollector() *ConsecutiveEntryCollector {
+	return &ConsecutiveEntryCollector{}
 }
 
 func (c *ConsecutiveEntryCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -162,6 +175,7 @@ func (c *ConsecutiveEntryCollector) IsEmpty() bool {
 	return c.content == nil
 }
 
+//EntrySize returns the size of consecutive entry array
 func (c *ConsecutiveEntryCollector) EntrySize() int {
 	if c.IsEmpty() {
 		return 0
@@ -170,6 +184,7 @@ func (c *ConsecutiveEntryCollector) EntrySize() int {
 	return len(c.content)
 }
 
+//GetLatestTerm gets the Term field of the last entry.
 func (c *ConsecutiveEntryCollector) GetLatestTerm() (bool, uint64) {
 	if c.IsEmpty() {
 		return false, 0
@@ -441,6 +456,7 @@ func (c *ConsecutiveEntryCollector) checkIfAppendable(logTerm, logIndex uint64) 
 	return false
 }
 
+//EntryFragment represents an array of entries with consecutive indices.
 type EntryFragment struct {
 	logTerm  uint64
 	logIndex uint64
@@ -457,14 +473,25 @@ type subCollector struct {
 	next  *subCollector
 }
 
-//EntryFragmentCollector is an implementation of Collector. It maintains a Collector array which allows
-// the combination of several disjoint entry fragments.
+//EntryFragmentCollector is an implementation of Collector. It maintains a Collector list which allows
+// the combination of several disjoint entry fragments (EntryFragment). Each fragments is a collection of
+// entries with consecutive indices.
+//
+// The collector allows overlapping between fragments before internal regularization.
+// The regularization will be automatically called if 1) it fetches some information (entries, fragments,
+// brief segments, etc.) from the internal list, or 2) SetRegularized changes regularized from false to true.
+// If you want to relieve the burden from regularization, make sure defaultRegOpt is true - the collector
+// will not allow the temporary overlapping during AddEntries.
 type EntryFragmentCollector struct {
 	head *subCollector
 	tail *subCollector
 
 	regularized   bool
 	defaultRegOpt bool
+}
+
+func NewEntryFragmentCollector(defaultRegOpt bool) *EntryFragmentCollector {
+	return &EntryFragmentCollector{defaultRegOpt: defaultRegOpt, regularized: defaultRegOpt}
 }
 
 func (c *EntryFragmentCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -548,6 +575,29 @@ func (c *EntryFragmentCollector) IsEmpty() bool {
 	return c.head == nil || c.head.IsEmpty()
 }
 
+func (c *EntryFragmentCollector) DefaultRegOpt() bool {
+	return c.defaultRegOpt
+}
+
+func (c *EntryFragmentCollector) SetDefaultRegOpt(defaultRegOpt bool) {
+	c.defaultRegOpt = defaultRegOpt
+}
+
+func (c *EntryFragmentCollector) Regularized() bool {
+	return c.regularized
+}
+
+func (c *EntryFragmentCollector) SetRegularized(regularized bool) {
+	if !c.regularized && regularized {
+		c.regularize()
+		return
+	}
+
+	c.regularized = regularized
+}
+
+//FetchFragmentsWithStartIndex fetches fragments with index >= startIndex. If part of some fragment
+// is not satisfied, truncate it. Return false if no such a fragment.
 func (c *EntryFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
 	if c.IsEmpty() {
 		return false, nil
@@ -564,6 +614,7 @@ func (c *EntryFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (boo
 	return true, frag
 }
 
+//FetchAllFragments fetches all fragments from the list. Return false if it is empty.
 func (c *EntryFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
 	if c.IsEmpty() {
 		return false, nil
@@ -653,21 +704,9 @@ func (c *EntryFragmentCollector) locateEntries(term uint64) Collector {
 	return nil
 }
 
-func (c *EntryFragmentCollector) attachNewSubCollector() Collector {
-	if c.head == nil {
-		c.head = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}}
-		c.tail = c.head
-	} else {
-		c.tail.next = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}, prev: c.tail}
-		c.tail = c.tail.next
-	}
-
-	return c.tail
-}
-
 func (c *EntryFragmentCollector) regularizedAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
 	if c.head == nil {
-		c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+		c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 		return
 	}
 
@@ -685,18 +724,18 @@ func (c *EntryFragmentCollector) regularizedAddEntries(entries []raftpb.Entry, l
 		needle = needle.next
 	}
 
-	c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+	c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 }
 
 func (c *EntryFragmentCollector) addEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
 	if c.head == nil {
-		c.attachNewSubCollector()
+		c.addSubCollectorAndMoveToTail()
 	}
 
 	c.tail.brief = nil
 
 	if ok := c.tail.AddEntries(entries, logTerm, logIndex); !ok {
-		c.attachNewSubCollector().AddEntries(entries, logTerm, logIndex)
+		c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 	}
 }
 
@@ -719,11 +758,69 @@ func (c *EntryFragmentCollector) regularize() {
 			break
 		}
 		needle.brief = nil
+
+		if needle.IsEmpty() {
+			needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
+			continue
+		}
+
+		next := needle.next
+
+		for next != nil {
+			ok, ent, lt, li := next.FetchAllEntries()
+
+			if ok && !needle.AddEntries(ent, lt, li) {
+				break
+			}
+
+			next = c.tryRemoveSubCollectorAndMoveToNext(next)
+		}
+
 		needle = needle.next
 	}
 
-	//todo: regularization
-
 	c.regularized = true
-	panic("regularization not yet finished")
+}
+
+func (c *EntryFragmentCollector) addSubCollectorAndMoveToTail() *subCollector {
+	if c.head == nil {
+		c.head = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}}
+		c.tail = c.head
+	} else {
+		c.tail.next = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}, prev: c.tail}
+		c.tail = c.tail.next
+	}
+
+	return c.tail
+}
+
+func (c *EntryFragmentCollector) tryRemoveSubCollectorAndMoveToNext(sc *subCollector) *subCollector {
+	if c.head == sc {
+		if sc.next == nil {
+			return nil
+		}
+		c.head = sc.next
+		sc.next = nil
+		c.head.prev = nil
+
+		return c.head
+	}
+
+	if c.tail == sc {
+		c.tail = sc.prev
+		sc.prev = nil
+		c.tail.next = nil
+
+		return nil
+	}
+
+	next := sc.next
+	sc.next = nil
+	prev := sc.prev
+	sc.prev = nil
+
+	prev.next = next
+	next.prev = prev
+
+	return next
 }
