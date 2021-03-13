@@ -37,11 +37,10 @@ type Collector interface {
 	//Refresh removes all internal status.
 	Refresh()
 
-	//Briefing makes a brief report on Collector. The report comprises of several segments, each of which
-	// describing the
-	Briefing() (bool, []*CollectorBriefSegment)
+	//Briefing makes a brief report of the collector.
+	Briefing() []*CollectorBriefSegment
 
-	//IsEmpty checks if the Collector is empty
+	//IsEmpty checks if the collector is empty.
 	IsEmpty() bool
 }
 
@@ -135,9 +134,9 @@ func (c *ConsecutiveEntryCollector) Refresh() {
 	c.destroyCachedTable()
 }
 
-func (c *ConsecutiveEntryCollector) Briefing() (bool, []*CollectorBriefSegment) {
+func (c *ConsecutiveEntryCollector) Briefing() []*CollectorBriefSegment {
 	if c.content == nil {
-		return false, nil
+		return nil
 	}
 
 	var result []*CollectorBriefSegment
@@ -168,7 +167,7 @@ func (c *ConsecutiveEntryCollector) Briefing() (bool, []*CollectorBriefSegment) 
 
 	c.cachedTable = ct
 
-	return true, result
+	return result
 }
 
 func (c *ConsecutiveEntryCollector) IsEmpty() bool {
@@ -555,20 +554,20 @@ func (c *EntryFragmentCollector) Refresh() {
 	c.regularized = c.defaultRegOpt
 }
 
-func (c *EntryFragmentCollector) Briefing() (bool, []*CollectorBriefSegment) {
+func (c *EntryFragmentCollector) Briefing() []*CollectorBriefSegment {
 	if c.head == nil {
-		return false, nil
+		return nil
 	}
 
 	if c.head.brief == nil {
 		var ok bool
-		ok, c.head.brief = c.head.Briefing()
+		c.head.brief = c.head.Briefing()
 		if !ok {
-			return false, nil
+			return nil
 		}
 	}
 
-	return true, c.briefing()
+	return c.briefing()
 }
 
 func (c *EntryFragmentCollector) IsEmpty() bool {
@@ -664,7 +663,7 @@ func (c *EntryFragmentCollector) briefing() []*CollectorBriefSegment {
 	needle := c.head
 	for needle != nil {
 		if needle.brief == nil {
-			_, needle.brief = needle.Briefing()
+			needle.brief = needle.Briefing()
 		}
 		result = append(result, needle.brief...)
 		needle = needle.next
@@ -677,7 +676,7 @@ func (c *EntryFragmentCollector) locateEntries(term uint64) Collector {
 	needle := c.head
 	for needle != nil {
 		if needle.brief == nil {
-			_, needle.brief = needle.Briefing()
+			needle.brief = needle.Briefing()
 		}
 
 		b := needle.brief

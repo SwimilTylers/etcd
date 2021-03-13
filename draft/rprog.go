@@ -16,6 +16,7 @@ type RackProgressDescriptor struct {
 	Entries  []raftpb.Entry
 }
 
+//RackProgressAnalyzer analyzes the current progress of the specific rack.
 type RackProgressAnalyzer interface {
 	//InitAs initializes RackProgressAnalyzer with the specific RackProgressDescriptor forcefully.
 	// If there are latent variables and buffered entries, clear it out.
@@ -42,12 +43,23 @@ type RackProgressAnalyzer interface {
 	MatchEntryPrefix(logTerm, logIndex uint64) (bool, uint64, uint64)
 }
 
+type CACMergeType func(commit uint64, major Collector, minor []Collector, minorCommit []uint64) uint64
+type CABMergeType func(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment
+
+//CollectorAnalyzer employs several types of Collector to analyze progress and resolve conflicts
+// between different information sources. The analyzer uses a array of minor collectors to record
+// the incoming offers. TryOfferEntries buffers entries directly to the first minor collector.
+// TryOfferCollector appends the incoming Collector to the minor collector array. Before analysis,
+// the analyzer will launch collector merging (cMerge) or brief segment merging (bMerge).
 type CollectorAnalyzer struct {
 	majorSeq    Collector
 	minorSeq    []Collector
 	minorCommit []uint64
 
 	cachedMajorTable []*CollectorBriefSegment
+
+	cMerge CACMergeType
+	bMerge CABMergeType
 
 	term    uint64
 	tHolder uint64
@@ -56,10 +68,19 @@ type CollectorAnalyzer struct {
 	modified bool
 }
 
-func NewCollectorAnalyzer(majorSeq Collector, minorFirstSeq Collector) *CollectorAnalyzer {
+func NewDefaultCollectorAnalyzer() *CollectorAnalyzer {
+	return NewCollectorAnalyzer(
+		NewConsecutiveEntryCollector(),
+		NewConsecutiveEntryCollector(),
+		CEC2EFCxMerge,
+		CombineCollectorBriefSegment,
+	)
+}
+
+func NewCollectorAnalyzer(majorSeq Collector, minorFirstSeq Collector, cMerge CACMergeType, bMerge CABMergeType) *CollectorAnalyzer {
 	minorSeq := make([]Collector, 1, 3)
 	minorSeq[0] = minorFirstSeq
-	return &CollectorAnalyzer{majorSeq: majorSeq, minorSeq: minorSeq, modified: false}
+	return &CollectorAnalyzer{majorSeq: majorSeq, minorSeq: minorSeq, cMerge: cMerge, bMerge: bMerge, modified: false}
 }
 
 func (ca *CollectorAnalyzer) InitAs(d *RackProgressDescriptor) {
@@ -137,6 +158,22 @@ func (ca *CollectorAnalyzer) MatchEntryPrefix(logTerm, logIndex uint64) (bool, u
 	return ca.locateCacheWithPrefix(logTerm, logIndex)
 }
 
+func (ca *CollectorAnalyzer) CMerge() CACMergeType {
+	return ca.cMerge
+}
+
+func (ca *CollectorAnalyzer) SetCMerge(cMerge CACMergeType) {
+	ca.cMerge = cMerge
+}
+
+func (ca *CollectorAnalyzer) BMerge() CABMergeType {
+	return ca.bMerge
+}
+
+func (ca *CollectorAnalyzer) SetBMerge(bMerge CABMergeType) {
+	ca.bMerge = bMerge
+}
+
 func (ca *CollectorAnalyzer) refreshCollectors() {
 	ca.majorSeq.Refresh()
 	ca.minorSeq = ca.minorSeq[:1]
@@ -154,50 +191,12 @@ func (ca *CollectorAnalyzer) destroyCachedMajorTable() {
 
 func (ca *CollectorAnalyzer) upgrade() {
 	ca.majorSeq.Refresh()
-	ca.mergeMinorIntoMajor()
-	_, ca.cachedMajorTable = ca.majorSeq.Briefing()
-}
-
-func (ca *CollectorAnalyzer) mergeMinorIntoMajor() {
-	// merge the first minor collector
-	if !ca.minorSeq[0].IsEmpty() {
-		if ok, ent, lt, li := ca.minorSeq[0].FetchAllEntries(); ok {
-			ca.majorSeq.AddEntries(ent, lt, li)
-		}
-		ca.commit = ca.minorCommit[0]
-	}
-
-	// merge the other minor collectors
-	var cc = ca.majorSeq.(*ConsecutiveEntryCollector)
-	var fc []*EntryFragmentCollector
-	for i, c := range ca.minorSeq {
-		if i == 0 {
-			// skip the first minor collector
-			continue
-		}
-
-		if c.IsEmpty() {
-			// skip empty collector
-			continue
-		}
-
-		if fcc, ok := c.(*EntryFragmentCollector); ok {
-			fc = append(fc, fcc)
-		}
-	}
-
-	// merge fragments
-	MergeEntryFragments(ca.commit, fc, cc)
-
-	// merge commit index
-	for _, commit := range ca.minorCommit {
-		if commit > ca.commit {
-			ca.commit = commit
-		}
-	}
+	ca.commit = ca.cMerge(ca.commit, ca.majorSeq, ca.minorSeq, ca.minorCommit)
+	ca.cachedMajorTable = ca.bMerge(ca.cachedMajorTable, ca.majorSeq.Briefing())
 }
 
 func (ca *CollectorAnalyzer) locateCacheWithPrefix(logTerm, logIndex uint64) (bool, uint64, uint64) {
+	panic("implement me")
 	return false, 0, 0
 }
 

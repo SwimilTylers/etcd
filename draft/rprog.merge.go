@@ -1,10 +1,50 @@
 package draft
 
-/**
-* merge: []*EntryFragmentCollector => *ConsecutiveEntryCollector
- */
+//CEC2EFCxMerge implements a merging between ConsecutiveEntryCollector and EntryFragmentCollector.
+// The major collector must be a ConsecutiveEntryCollector. The first minor collector should be a
+// ConsecutiveEntryCollector as well. The rest should be EntryFragmentCollector, omitted if not.
+func CEC2EFCxMerge(commit uint64, major Collector, minor []Collector, minorCommit []uint64) uint64 {
+	// merge the first minor collector
+	if !minor[0].IsEmpty() {
+		if ok, ent, lt, li := minor[0].FetchAllEntries(); ok {
+			major.AddEntries(ent, lt, li)
+		}
+		commit = minorCommit[0]
+	}
 
-// MergeEntryFragments
+	// merge the other minor collectors
+	var cc = major.(*ConsecutiveEntryCollector)
+	var fc []*EntryFragmentCollector
+	for i, c := range minor {
+		if i == 0 {
+			// skip the first minor collector
+			continue
+		}
+
+		if c.IsEmpty() {
+			// skip empty collector
+			continue
+		}
+
+		if fcc, ok := c.(*EntryFragmentCollector); ok {
+			fc = append(fc, fcc)
+		}
+	}
+
+	// merge fragments
+	MergeEntryFragments(commit, fc, cc)
+
+	// merge commit index
+	for _, c := range minorCommit {
+		if c > commit {
+			commit = c
+		}
+	}
+
+	return commit
+}
+
+//MergeEntryFragments merges in-collectors to out-collector.
 func MergeEntryFragments(commit uint64, in []*EntryFragmentCollector, out *ConsecutiveEntryCollector) {
 	inLen := len(in)
 
