@@ -64,7 +64,7 @@ type ConsecutiveEntryCollector struct {
 }
 
 func NewConsecutiveEntryCollector() *ConsecutiveEntryCollector {
-	return &ConsecutiveEntryCollector{}
+	return &ConsecutiveEntryCollector{copied: false}
 }
 
 func (c *ConsecutiveEntryCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -262,7 +262,7 @@ func (c *ConsecutiveEntryCollector) rmvEntries(logTerm, logIndex uint64) int {
 
 	if legal {
 		if c.content[idx].Term == logTerm {
-			return c.resize(idx, logTerm, logIndex)
+			return c.resize(idx+1, logTerm, logIndex)
 		}
 
 		term := c.content[idx].Term
@@ -750,32 +750,40 @@ func (c *EntryFragmentCollector) regularize() {
 
 	// clear out buffered brief
 
-	needle := c.head
+	for {
+		needle := c.head
+		regular := true
 
-	for needle != nil {
-		if needle.brief == nil {
-			break
-		}
-		needle.brief = nil
-
-		if needle.IsEmpty() {
-			needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
-			continue
-		}
-
-		next := needle.next
-
-		for next != nil {
-			ok, ent, lt, li := next.FetchAllEntries()
-
-			if ok && !needle.AddEntries(ent, lt, li) {
+		for needle != nil {
+			if needle.brief == nil {
 				break
 			}
+			needle.brief = nil
 
-			next = c.tryRemoveSubCollectorAndMoveToNext(next)
+			if needle.IsEmpty() {
+				needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
+				continue
+			}
+
+			next := needle.next
+
+			for next != nil {
+				ok, ent, lt, li := next.FetchAllEntries()
+
+				if ok && !needle.AddEntries(ent, lt, li) {
+					regular = false
+					break
+				}
+
+				next = c.tryRemoveSubCollectorAndMoveToNext(next)
+			}
+
+			needle = needle.next
 		}
 
-		needle = needle.next
+		if regular {
+			break
+		}
 	}
 
 	c.regularized = true
