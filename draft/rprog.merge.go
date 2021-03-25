@@ -2,13 +2,13 @@ package draft
 
 import "sort"
 
-//CEC2EFCxMerge implements a merging between ConsecutiveEntryCollector and EntryFragmentCollector.
-// The major collector must be a ConsecutiveEntryCollector. The first minor collector should be a
-// ConsecutiveEntryCollector as well. The rest should be EntryFragmentCollector, omitted if not.
+//CEC2EFCxMerge implements a merging between SimplifiedRaftLogCollector and EntryFragmentCollector.
+// The major collector must be a SimplifiedRaftLogCollector. The first minor collector should be a
+// SimplifiedRaftLogCollector as well. The rest should be EntryFragmentCollector, omitted if not.
 func CEC2EFCxMerge(commit uint64, major Collector, minor []Collector, minorCommit []uint64) uint64 {
 	// merge the first minor collector
-	var cc = major.(*ConsecutiveEntryCollector)
-	var mcc = minor[0].(*ConsecutiveEntryCollector)
+	var cc = major.(ConsecutiveEntryCollector)
+	var mcc = minor[0].(ConsecutiveEntryCollector)
 
 	if !mcc.IsEmpty() && commit <= minorCommit[0] {
 		ok, ent, lt, li := mcc.FetchEntriesWithStartIndex(commit)
@@ -57,7 +57,7 @@ func CEC2EFCxMerge(commit uint64, major Collector, minor []Collector, minorCommi
 }
 
 //MergeEntryFragments merges in-collectors to out-collector.
-func MergeEntryFragments(commit uint64, in []*EntryFragmentCollector, out *ConsecutiveEntryCollector) {
+func MergeEntryFragments(commit uint64, in []*EntryFragmentCollector, out ConsecutiveEntryCollector) {
 	inLen := len(in)
 
 	if inLen == 0 {
