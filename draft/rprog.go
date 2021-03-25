@@ -22,9 +22,13 @@ type RackProgressAnalyzer interface {
 	// If there are latent variables and buffered entries, clear it out.
 	InitAs(d *RackProgressDescriptor)
 
-	//Progress gets the latest progress since the last Progress call.
+	//Progress gets the latest progress since the last Progress or Gossip call.
 	// This operation triggers the analysis and clears out buffer.
 	Progress() (*RackProgressDescriptor, error)
+
+	//Gossip gets the latest progress since the last Progress or Gossip call.
+	// This operation triggers the analysis but will not clear out buffer.
+	Gossip() (*RackProgressDescriptor, error)
 
 	//TryOfferCollector buffers Collector to RackProgressAnalyzer for analysis.
 	// If analyzer does not accept the offer, return false.
@@ -73,7 +77,7 @@ func NewDefaultCollectorAnalyzer() *CollectorAnalyzer {
 		NewConsecutiveEntryCollector(),
 		NewConsecutiveEntryCollector(),
 		CEC2EFCxMerge,
-		CombineCollectorBriefSegment,
+		UseNewCollectorBriefSegment,
 	)
 }
 
@@ -97,17 +101,11 @@ func (ca *CollectorAnalyzer) InitAs(d *RackProgressDescriptor) {
 }
 
 func (ca *CollectorAnalyzer) Progress() (*RackProgressDescriptor, error) {
-	if !ca.modified {
-		return noProgress(), nil
-	}
+	return ca.analyze(true)
+}
 
-	ca.upgrade()
-	_, ent, lt, li := ca.majorSeq.FetchAllEntries()
-	ca.majorSeq.Refresh()
-
-	ca.modified = false
-
-	return newProgress(ca.term, ca.tHolder, ca.commit, lt, li, ent), nil
+func (ca *CollectorAnalyzer) Gossip() (*RackProgressDescriptor, error) {
+	return ca.analyze(false)
 }
 
 func (ca *CollectorAnalyzer) TryOfferCollector(term, termHolder, latestCommit uint64, c Collector) bool {
@@ -147,14 +145,12 @@ func (ca *CollectorAnalyzer) TryOfferEntries(term, termHolder, latestCommit, log
 }
 
 func (ca *CollectorAnalyzer) MatchEntryPrefix(logTerm, logIndex uint64) (bool, uint64, uint64) {
-	if !ca.modified {
-		if ca.cachedMajorTable == nil {
-			ca.upgrade()
-		}
-		return ca.locateCacheWithPrefix(logTerm, logIndex)
+	ca.upgrade()
+
+	if ca.cachedMajorTable == nil {
+		return false, 0, 0
 	}
 
-	ca.upgrade()
 	return ca.locateCacheWithPrefix(logTerm, logIndex)
 }
 
@@ -174,6 +170,20 @@ func (ca *CollectorAnalyzer) SetBMerge(bMerge CABMergeType) {
 	ca.bMerge = bMerge
 }
 
+func (ca *CollectorAnalyzer) analyze(refreshCollectors bool) (*RackProgressDescriptor, error) {
+	if !ca.modified {
+		return noProgress(), nil
+	}
+
+	ca.upgrade()
+	_, ent, lt, li := ca.majorSeq.FetchAllEntries()
+	if refreshCollectors {
+		ca.refreshCollectors()
+	}
+
+	return newProgress(ca.term, ca.tHolder, ca.commit, lt, li, ent), nil
+}
+
 func (ca *CollectorAnalyzer) refreshCollectors() {
 	ca.majorSeq.Refresh()
 	ca.minorSeq = ca.minorSeq[:1]
@@ -190,9 +200,13 @@ func (ca *CollectorAnalyzer) destroyCachedMajorTable() {
 }
 
 func (ca *CollectorAnalyzer) upgrade() {
-	ca.majorSeq.Refresh()
+	if !ca.modified {
+		return
+	}
+
 	ca.commit = ca.cMerge(ca.commit, ca.majorSeq, ca.minorSeq, ca.minorCommit)
 	ca.cachedMajorTable = ca.bMerge(ca.cachedMajorTable, ca.majorSeq.Briefing())
+	ca.modified = false
 }
 
 func (ca *CollectorAnalyzer) locateCacheWithPrefix(logTerm, logIndex uint64) (bool, uint64, uint64) {
@@ -202,6 +216,18 @@ func (ca *CollectorAnalyzer) locateCacheWithPrefix(logTerm, logIndex uint64) (bo
 
 func (ca *CollectorAnalyzer) isLegalOffer(commit, term uint64) bool {
 	return term >= ca.term && commit >= ca.commit
+}
+
+func UseNewCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
+	return s1
+}
+
+func UseOldCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
+	return s0
+}
+
+func UseJointCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
+	return CombineCollectorBriefSegment(s0, s1)
 }
 
 func noProgress() *RackProgressDescriptor {

@@ -14,7 +14,7 @@ type CollectorBriefSegment struct {
 //CombineCollectorBriefSegment provides a lightweight approach for entry appending and
 // conflict resolution at the level of CollectorBriefSegment arrays.
 func CombineCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
-	return nil
+	panic("implement me")
 }
 
 //Collector works for Entry Appending and Conflict Resolution
@@ -589,7 +589,6 @@ func (c *EntryFragmentCollector) Regularized() bool {
 func (c *EntryFragmentCollector) SetRegularized(regularized bool) {
 	if !c.regularized && regularized {
 		c.regularize()
-		return
 	}
 
 	c.regularized = regularized
