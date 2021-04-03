@@ -1,19 +1,31 @@
 package draft
 
-//CEC2EFCxMerge implements a merging between ConsecutiveEntryCollector and EntryFragmentCollector.
-// The major collector must be a ConsecutiveEntryCollector. The first minor collector should be a
-// ConsecutiveEntryCollector as well. The rest should be EntryFragmentCollector, omitted if not.
+import "sort"
+
+//CEC2EFCxMerge implements a merging between SimplifiedRaftLogCollector and EntryFragmentCollector.
+// The major collector must be a SimplifiedRaftLogCollector. The first minor collector should be a
+// SimplifiedRaftLogCollector as well. The rest should be EntryFragmentCollector, omitted if not.
 func CEC2EFCxMerge(commit uint64, major Collector, minor []Collector, minorCommit []uint64) uint64 {
 	// merge the first minor collector
-	if !minor[0].IsEmpty() {
-		if ok, ent, lt, li := minor[0].FetchAllEntries(); ok {
-			major.AddEntries(ent, lt, li)
+	var cc = major.(ConsecutiveEntryCollector)
+	var mcc = minor[0].(ConsecutiveEntryCollector)
+
+	if !mcc.IsEmpty() && commit <= minorCommit[0] {
+		ok, ent, lt, li := mcc.FetchEntriesWithStartIndex(commit)
+
+		if ok {
+			_, t := mcc.GetLatestTerm()
+			_, tt := cc.GetLatestTerm()
+
+			if cc.IsEmpty() || t >= tt {
+				cc.AddEntries(ent, lt, li)
+			}
 		}
+
 		commit = minorCommit[0]
 	}
 
 	// merge the other minor collectors
-	var cc = major.(*ConsecutiveEntryCollector)
 	var fc []*EntryFragmentCollector
 	for i, c := range minor {
 		if i == 0 {
@@ -45,59 +57,49 @@ func CEC2EFCxMerge(commit uint64, major Collector, minor []Collector, minorCommi
 }
 
 //MergeEntryFragments merges in-collectors to out-collector.
-func MergeEntryFragments(commit uint64, in []*EntryFragmentCollector, out *ConsecutiveEntryCollector) {
+func MergeEntryFragments(commit uint64, in []*EntryFragmentCollector, out ConsecutiveEntryCollector) {
 	inLen := len(in)
 
 	if inLen == 0 {
 		return
 	}
 
-	fragments := make([][]*EntryFragment, 0, inLen)
-	fIndices := make([]int, 0, inLen)
+	fragments := make([]*EntryFragment, 0, inLen)
 
 	_, initTerm := out.GetLatestTerm()
 
-	// filter out out-of-date fragments
+	// draw fragments from in-collector and filter out out-of-date fragments
 	for _, c := range in {
 		if ok, fragment := c.FetchFragmentsWithStartIndex(commit + 1); ok {
-			idx := -1
 			for j, f := range fragment {
 				if f.latestTerm >= initTerm {
-					idx = j
+					fragments = append(fragments, fragment[j:]...)
+					break
 				}
-			}
-			if idx != -1 {
-				fragments = append(fragments, fragment)
-				fIndices = append(fIndices, idx)
 			}
 		}
 	}
 
-	count := len(fragments)
+	if len(fragments) == 0 {
+		return
+	}
 
-	// merging
-	for count > 0 {
-		min := 0
-		minTerm := fragments[0][fIndices[0]].latestTerm
-
-		for i := 1; i < inLen; i++ {
-			index := fIndices[i]
-			if index == len(fragments[i]) {
-				continue
-			}
-			term := fragments[i][index].latestTerm
-			if term < minTerm {
-				min = i
-				minTerm = term
-			}
+	// sort the fragments
+	sort.Slice(fragments, func(i, j int) bool {
+		if fragments[i].latestTerm == fragments[j].latestTerm {
+			return len(fragments[i].fragment) > len(fragments[j].fragment)
 		}
 
-		f := fragments[min][fIndices[min]]
-		fIndices[min]++
-		if fIndices[min] == len(fragments[min]) {
-			count--
-		}
+		return fragments[i].latestTerm < fragments[j].latestTerm
+	})
 
-		out.AddEntries(f.fragment, f.logTerm, f.logIndex)
+	// merging fragments into out-collector
+	nextTerm := fragments[0].latestTerm
+
+	for _, f := range fragments {
+		if f.latestTerm >= nextTerm {
+			out.AddEntries(f.fragment, f.logTerm, f.logIndex)
+			nextTerm++
+		}
 	}
 }

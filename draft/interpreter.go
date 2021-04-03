@@ -251,7 +251,7 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 	}
 
 	// avoid affect to the following steps
-	_, _ = an.Progress()
+	_, _ = an.Gossip()
 
 	return nil
 }

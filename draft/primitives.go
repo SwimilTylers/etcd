@@ -13,6 +13,7 @@ type Update struct {
 	ZeroDelta bool
 
 	Collected Collector
+	Commit    uint64
 	VoteMsg   *raftpb.Message
 	Err       error
 }
@@ -31,12 +32,13 @@ func noUpdate(file string) *Update {
 	}
 }
 
-func newUpdate(file string, term uint64, c Collector, vote *raftpb.Message) *Update {
+func newUpdate(file string, term uint64, c Collector, commit uint64, vote *raftpb.Message) *Update {
 	return &Update{
 		SourceFile: file,
 		Term:       term,
 		ZeroDelta:  false,
 		Collected:  c,
+		Commit:     commit,
 		VoteMsg:    vote,
 	}
 }
@@ -200,5 +202,5 @@ func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c Collector) *U
 		vote = &last
 	}
 
-	return newUpdate(file, last.Term, c, vote)
+	return newUpdate(file, last.Term, c, last.Commit, vote)
 }

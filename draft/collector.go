@@ -14,7 +14,7 @@ type CollectorBriefSegment struct {
 //CombineCollectorBriefSegment provides a lightweight approach for entry appending and
 // conflict resolution at the level of CollectorBriefSegment arrays.
 func CombineCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
-	return nil
+	panic("implement me")
 }
 
 //Collector works for Entry Appending and Conflict Resolution
@@ -44,12 +44,18 @@ type Collector interface {
 	IsEmpty() bool
 }
 
-//ConsecutiveEntryCollector is an implementation of Collector. It maintains an entry array
+type ConsecutiveEntryCollector interface {
+	Collector
+	EntrySize() int
+	GetLatestTerm() (bool, uint64)
+}
+
+//SimplifiedRaftLogCollector is an implementation of Collector. It maintains an entry array
 // with consecutive indices. During the process of AddEntries, it might reinitialize the
 // internal array or truncate the internal array. If new entries are not appendable even
 // after those steps, the collector will not take in these entries for the maintenance of
 // consecutive-ness.
-type ConsecutiveEntryCollector struct {
+type SimplifiedRaftLogCollector struct {
 	logTerm   uint64
 	logIndex  uint64
 	nextIndex uint64
@@ -63,17 +69,17 @@ type ConsecutiveEntryCollector struct {
 	}
 }
 
-func NewConsecutiveEntryCollector() *ConsecutiveEntryCollector {
-	return &ConsecutiveEntryCollector{}
+func NewConsecutiveEntryCollector() *SimplifiedRaftLogCollector {
+	return &SimplifiedRaftLogCollector{copied: false}
 }
 
-func (c *ConsecutiveEntryCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
+func (c *SimplifiedRaftLogCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
 	c.destroyCachedTable()
 	success, _ := c.addEntries(entries, logTerm, logIndex)
 	return success
 }
 
-func (c *ConsecutiveEntryCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
+func (c *SimplifiedRaftLogCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -98,7 +104,7 @@ func (c *ConsecutiveEntryCollector) FetchEntries(term uint64) (bool, []raftpb.En
 	return true, c.content[left : right+1], last.Term, last.Index
 }
 
-func (c *ConsecutiveEntryCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
+func (c *SimplifiedRaftLogCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -116,7 +122,7 @@ func (c *ConsecutiveEntryCollector) FetchEntriesWithStartIndex(index uint64) (bo
 	return true, c.content[idx:], before.Term, before.Index
 }
 
-func (c *ConsecutiveEntryCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
+func (c *SimplifiedRaftLogCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -124,7 +130,7 @@ func (c *ConsecutiveEntryCollector) FetchAllEntries() (bool, []raftpb.Entry, uin
 	return true, c.content, c.logTerm, c.logIndex
 }
 
-func (c *ConsecutiveEntryCollector) Refresh() {
+func (c *SimplifiedRaftLogCollector) Refresh() {
 	if c.content == nil {
 		return
 	}
@@ -134,7 +140,7 @@ func (c *ConsecutiveEntryCollector) Refresh() {
 	c.destroyCachedTable()
 }
 
-func (c *ConsecutiveEntryCollector) Briefing() []*CollectorBriefSegment {
+func (c *SimplifiedRaftLogCollector) Briefing() []*CollectorBriefSegment {
 	if c.content == nil {
 		return nil
 	}
@@ -170,12 +176,12 @@ func (c *ConsecutiveEntryCollector) Briefing() []*CollectorBriefSegment {
 	return result
 }
 
-func (c *ConsecutiveEntryCollector) IsEmpty() bool {
+func (c *SimplifiedRaftLogCollector) IsEmpty() bool {
 	return c.content == nil
 }
 
 //EntrySize returns the size of consecutive entry array
-func (c *ConsecutiveEntryCollector) EntrySize() int {
+func (c *SimplifiedRaftLogCollector) EntrySize() int {
 	if c.IsEmpty() {
 		return 0
 	}
@@ -184,7 +190,7 @@ func (c *ConsecutiveEntryCollector) EntrySize() int {
 }
 
 //GetLatestTerm gets the Term field of the last entry.
-func (c *ConsecutiveEntryCollector) GetLatestTerm() (bool, uint64) {
+func (c *SimplifiedRaftLogCollector) GetLatestTerm() (bool, uint64) {
 	if c.IsEmpty() {
 		return false, 0
 	}
@@ -192,7 +198,7 @@ func (c *ConsecutiveEntryCollector) GetLatestTerm() (bool, uint64) {
 	return true, c.content[len(c.content)-1].Term
 }
 
-func (c *ConsecutiveEntryCollector) init(entries []raftpb.Entry, logTerm, logIndex uint64) {
+func (c *SimplifiedRaftLogCollector) init(entries []raftpb.Entry, logTerm, logIndex uint64) {
 	c.copied = false
 	c.content = entries
 	c.logTerm = logTerm
@@ -200,7 +206,7 @@ func (c *ConsecutiveEntryCollector) init(entries []raftpb.Entry, logTerm, logInd
 	c.nextIndex = logIndex + uint64(len(entries)) + 1
 }
 
-func (c *ConsecutiveEntryCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, bool) {
+func (c *SimplifiedRaftLogCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, bool) {
 	if c.content == nil || logIndex <= c.logIndex {
 		c.init(entries, logTerm, logIndex)
 		return true, false
@@ -248,7 +254,7 @@ func (c *ConsecutiveEntryCollector) addEntries(entries []raftpb.Entry, logTerm, 
 	return true, truncated
 }
 
-func (c *ConsecutiveEntryCollector) rmvEntries(logTerm, logIndex uint64) int {
+func (c *SimplifiedRaftLogCollector) rmvEntries(logTerm, logIndex uint64) int {
 	if len(c.content) == 0 {
 		return 0
 	}
@@ -262,7 +268,7 @@ func (c *ConsecutiveEntryCollector) rmvEntries(logTerm, logIndex uint64) int {
 
 	if legal {
 		if c.content[idx].Term == logTerm {
-			return c.resize(idx, logTerm, logIndex)
+			return c.resize(idx+1, logTerm, logIndex)
 		}
 
 		term := c.content[idx].Term
@@ -294,7 +300,7 @@ func (c *ConsecutiveEntryCollector) rmvEntries(logTerm, logIndex uint64) int {
 	return len(c.content)
 }
 
-func (c *ConsecutiveEntryCollector) resize(length int, logTerm, logIndex uint64) int {
+func (c *SimplifiedRaftLogCollector) resize(length int, logTerm, logIndex uint64) int {
 	if length >= len(c.content) {
 		return len(c.content)
 	}
@@ -317,12 +323,12 @@ func (c *ConsecutiveEntryCollector) resize(length int, logTerm, logIndex uint64)
 	return length
 }
 
-func (c *ConsecutiveEntryCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
+func (c *SimplifiedRaftLogCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
 	rel := int(logIndex - c.logIndex - 1)
 	return rel >= 0 && rel < len(c.content), rel
 }
 
-func (c *ConsecutiveEntryCollector) locateEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *SimplifiedRaftLogCollector) locateEntryWithTerm(term uint64, from, to int) (bool, int) {
 	if ok, l, _ := c.locateCachedTableWithTerm(term, from, to); ok {
 		return true, l
 	}
@@ -345,7 +351,7 @@ func (c *ConsecutiveEntryCollector) locateEntryWithTerm(term uint64, from, to in
 	return false, start
 }
 
-func (c *ConsecutiveEntryCollector) locateFirstEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *SimplifiedRaftLogCollector) locateFirstEntryWithTerm(term uint64, from, to int) (bool, int) {
 	if ok, l, _ := c.locateCachedTableWithTerm(term, from, to); ok {
 		return true, l
 	}
@@ -371,7 +377,7 @@ func (c *ConsecutiveEntryCollector) locateFirstEntryWithTerm(term uint64, from, 
 	return false, start
 }
 
-func (c *ConsecutiveEntryCollector) locateLastEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *SimplifiedRaftLogCollector) locateLastEntryWithTerm(term uint64, from, to int) (bool, int) {
 	if ok, _, r := c.locateCachedTableWithTerm(term, from, to); ok {
 		return true, r
 	}
@@ -397,14 +403,14 @@ func (c *ConsecutiveEntryCollector) locateLastEntryWithTerm(term uint64, from, t
 	return false, start
 }
 
-func (c *ConsecutiveEntryCollector) destroyCachedTable() {
+func (c *SimplifiedRaftLogCollector) destroyCachedTable() {
 	if c.cachedTable == nil {
 		return
 	}
 	c.cachedTable = c.cachedTable[:0]
 }
 
-func (c *ConsecutiveEntryCollector) locateCachedTableWithTerm(term uint64, from, to int) (bool, int, int) {
+func (c *SimplifiedRaftLogCollector) locateCachedTableWithTerm(term uint64, from, to int) (bool, int, int) {
 	if len(c.cachedTable) == 0 {
 		return false, 0, 0
 	}
@@ -443,7 +449,7 @@ func (c *ConsecutiveEntryCollector) locateCachedTableWithTerm(term uint64, from,
 	return false, 0, 0
 }
 
-func (c *ConsecutiveEntryCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
+func (c *SimplifiedRaftLogCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
 	if len(c.content) == 0 {
 		return true
 	}
@@ -466,7 +472,7 @@ type EntryFragment struct {
 }
 
 type subCollector struct {
-	*ConsecutiveEntryCollector
+	ConsecutiveEntryCollector
 	brief []*CollectorBriefSegment
 	prev  *subCollector
 	next  *subCollector
@@ -589,7 +595,6 @@ func (c *EntryFragmentCollector) Regularized() bool {
 func (c *EntryFragmentCollector) SetRegularized(regularized bool) {
 	if !c.regularized && regularized {
 		c.regularize()
-		return
 	}
 
 	c.regularized = regularized
@@ -643,7 +648,6 @@ func (c *EntryFragmentCollector) fetchFragments(index uint64) []*EntryFragment {
 			}
 		} else {
 			_, ent, logTerm, logIndex := needle.FetchAllEntries()
-			meet = true
 			result = append(result, &EntryFragment{
 				logTerm:    logTerm,
 				logIndex:   logIndex,
@@ -712,7 +716,7 @@ func (c *EntryFragmentCollector) regularizedAddEntries(entries []raftpb.Entry, l
 	needle := c.head
 
 	for needle != nil {
-		if ok, _ := needle.addEntries(entries, logTerm, logIndex); ok {
+		if ok := needle.AddEntries(entries, logTerm, logIndex); ok {
 			next := needle.next
 			if next != nil {
 				next.prev = nil
@@ -750,32 +754,40 @@ func (c *EntryFragmentCollector) regularize() {
 
 	// clear out buffered brief
 
-	needle := c.head
+	for {
+		needle := c.head
+		regular := true
 
-	for needle != nil {
-		if needle.brief == nil {
-			break
-		}
-		needle.brief = nil
-
-		if needle.IsEmpty() {
-			needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
-			continue
-		}
-
-		next := needle.next
-
-		for next != nil {
-			ok, ent, lt, li := next.FetchAllEntries()
-
-			if ok && !needle.AddEntries(ent, lt, li) {
+		for needle != nil {
+			if needle.brief == nil {
 				break
 			}
+			needle.brief = nil
 
-			next = c.tryRemoveSubCollectorAndMoveToNext(next)
+			if needle.IsEmpty() {
+				needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
+				continue
+			}
+
+			next := needle.next
+
+			for next != nil {
+				ok, ent, lt, li := next.FetchAllEntries()
+
+				if ok && !needle.AddEntries(ent, lt, li) {
+					regular = false
+					break
+				}
+
+				next = c.tryRemoveSubCollectorAndMoveToNext(next)
+			}
+
+			needle = needle.next
 		}
 
-		needle = needle.next
+		if regular {
+			break
+		}
 	}
 
 	c.regularized = true
@@ -783,10 +795,10 @@ func (c *EntryFragmentCollector) regularize() {
 
 func (c *EntryFragmentCollector) addSubCollectorAndMoveToTail() *subCollector {
 	if c.head == nil {
-		c.head = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}}
+		c.head = &subCollector{ConsecutiveEntryCollector: &SimplifiedRaftLogCollector{}}
 		c.tail = c.head
 	} else {
-		c.tail.next = &subCollector{ConsecutiveEntryCollector: &ConsecutiveEntryCollector{}, prev: c.tail}
+		c.tail.next = &subCollector{ConsecutiveEntryCollector: &SimplifiedRaftLogCollector{}, prev: c.tail}
 		c.tail = c.tail.next
 	}
 
