@@ -79,6 +79,14 @@ type PrimitiveProvider struct {
 	collector map[string]Collector
 }
 
+func NewPrimitiveProvider() *PrimitiveProvider {
+	return &PrimitiveProvider{
+		reader:    make(map[string]*updater),
+		writer:    make(map[string]IMFWriter),
+		collector: make(map[string]Collector),
+	}
+}
+
 func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Message, c chan<- bool) error {
 	if w, ok := pvd.writer[filepath.Join(rack, file)]; ok {
 		go func(message *raftpb.Message, c chan<- bool) {
@@ -127,6 +135,47 @@ func (pvd *PrimitiveProvider) GetUpdate(rack, file string) *Update {
 	}
 
 	return errUpdate(file, os.ErrNotExist)
+}
+
+func (pvd *PrimitiveProvider) IMFWriter(key string) IMFWriter {
+	return pvd.writer[key]
+}
+
+func (pvd *PrimitiveProvider) GrantWrite(key string, val IMFWriter) {
+	pvd.writer[key] = val
+}
+
+func (pvd *PrimitiveProvider) IMFReader(key string) (IMFReader, int) {
+	u := pvd.reader[key]
+	return u.reader, u.next
+}
+
+func (pvd *PrimitiveProvider) Collector(key string) Collector {
+	return pvd.collector[key]
+}
+
+func (pvd *PrimitiveProvider) GrantRead(key string, val IMFReader, c Collector) {
+	pvd.reader[key] = &updater{
+		next:   0,
+		reader: val,
+	}
+	pvd.collector[key] = c
+}
+
+func (pvd *PrimitiveProvider) ResetRead(key string, idx int, cRefresh bool) bool {
+	u, uok := pvd.reader[key]
+	c, cok := pvd.collector[key]
+
+	if uok && cok {
+		u.next = idx
+		if cRefresh {
+			c.Refresh()
+		}
+
+		return true
+	}
+
+	return false
 }
 
 func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c Collector) *Update {
