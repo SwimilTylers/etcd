@@ -139,24 +139,29 @@ func (pvd *PrimitiveProvider) GetUpdate(rack, file string) *Update {
 	return errUpdate(file, os.ErrNotExist)
 }
 
-func (pvd *PrimitiveProvider) IMFWriter(key string) IMFWriter {
+func (pvd *PrimitiveProvider) IMFWriter(rack, file string) IMFWriter {
+	key := filepath.Join(rack, file)
 	return pvd.writer[key]
 }
 
-func (pvd *PrimitiveProvider) GrantWrite(key string, val IMFWriter) {
+func (pvd *PrimitiveProvider) GrantWrite(rack, file string, val IMFWriter) {
+	key := filepath.Join(rack, file)
 	pvd.writer[key] = val
 }
 
-func (pvd *PrimitiveProvider) IMFReader(key string) (IMFReader, int) {
+func (pvd *PrimitiveProvider) IMFReader(rack, file string) (IMFReader, int) {
+	key := filepath.Join(rack, file)
 	u := pvd.reader[key]
 	return u.reader, u.next
 }
 
-func (pvd *PrimitiveProvider) Collector(key string) Collector {
+func (pvd *PrimitiveProvider) Collector(rack, file string) Collector {
+	key := filepath.Join(rack, file)
 	return pvd.collector[key]
 }
 
-func (pvd *PrimitiveProvider) GrantRead(key string, val IMFReader, c Collector) {
+func (pvd *PrimitiveProvider) GrantRead(rack, file string, val IMFReader, c Collector) {
+	key := filepath.Join(rack, file)
 	pvd.reader[key] = &updater{
 		next:   0,
 		reader: val,
@@ -164,7 +169,8 @@ func (pvd *PrimitiveProvider) GrantRead(key string, val IMFReader, c Collector) 
 	pvd.collector[key] = c
 }
 
-func (pvd *PrimitiveProvider) ResetRead(key string, idx int, cRefresh bool) bool {
+func (pvd *PrimitiveProvider) ResetRead(rack, file string, idx int, cRefresh bool) bool {
+	key := filepath.Join(rack, file)
 	u, uok := pvd.reader[key]
 	c, cok := pvd.collector[key]
 
