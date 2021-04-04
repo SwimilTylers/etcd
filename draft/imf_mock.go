@@ -245,3 +245,53 @@ func (injector *mockingIMFInjector) Commit(delta uint64) *mockingIMFInjector {
 	})
 	return injector
 }
+
+type mockingIMFInjectorHistory struct {
+	buf []*raftpb.Message
+}
+
+func (h *mockingIMFInjectorHistory) Append(m *raftpb.Message) {
+	h.buf = append(h.buf, m)
+}
+
+func (h *mockingIMFInjectorHistory) GetAll() []*raftpb.Message {
+	return h.buf
+}
+
+func (h *mockingIMFInjectorHistory) GetTop() *raftpb.Message {
+	if len(h.buf) == 0 {
+		return nil
+	}
+	return h.buf[len(h.buf)-1]
+}
+
+func (h *mockingIMFInjectorHistory) Clear() {
+	if len(h.buf) == 0 {
+		return
+	}
+	h.buf = h.buf[:0]
+}
+
+type mockingMemorableIMFInjector struct {
+	*mockingIMFInjector
+	history *mockingIMFInjectorHistory
+}
+
+func newMockingMemorableIMFInjector(his *mockingIMFInjectorHistory) *mockingMemorableIMFInjector {
+	return &mockingMemorableIMFInjector{newMockingIMFInjector(), his}
+}
+
+type mockingMemorableIMFInjectorWriter struct {
+	w   IMFWriter
+	his *mockingIMFInjectorHistory
+}
+
+func (mw *mockingMemorableIMFInjectorWriter) WriteIMF(message *raftpb.Message) error {
+	mw.his.Append(message)
+	return mw.w.WriteIMF(message)
+}
+
+func (injector *mockingMemorableIMFInjector) UseMemorable(w IMFWriter) *mockingIMFInjector {
+	w = &mockingMemorableIMFInjectorWriter{w, injector.history}
+	return injector.Use(w)
+}
