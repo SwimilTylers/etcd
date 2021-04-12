@@ -1,16 +1,15 @@
 package draft
 
 import (
+	"fmt"
 	"go.etcd.io/etcd/raft/raftpb"
-	"path/filepath"
 	"reflect"
-	"strconv"
 	"testing"
 )
 
 func TestEmptyUpdate(t *testing.T) {
 	ids := []uint64{0, 1, 2, 3, 4}
-	pps, _, _ := preparation(newMockingIMFStorage(), ids, false)
+	pps, _, _ := preparation(newMockingIMFStorage(), ids, false, false)
 	for _, host := range ids {
 		pp := pps[host]
 		for _, to := range ids {
@@ -18,7 +17,7 @@ func TestEmptyUpdate(t *testing.T) {
 				if from != host {
 					r, f := ft2rf(from, to)
 					if !reflect.DeepEqual(pp.GetUpdate(r, f), noUpdate(f)) {
-						t.Errorf("host=%v, rack='%s', file='%s': should get no update", host, r, f)
+						t.Fatalf("host=%v, rack='%s', file='%s': should get no update", host, r, f)
 					}
 				}
 			}
@@ -28,25 +27,25 @@ func TestEmptyUpdate(t *testing.T) {
 
 func TestVoteUpdate(t *testing.T) {
 	ids := []uint64{0, 1, 2, 3, 4}
-	pps, mis, mhs := preparation(newMockingIMFStorage(), ids, true)
+	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, false, true)
 
 	for _, from := range ids {
 		for _, to := range ids {
 			if from != to {
 				token := rf2t(ft2rf(from, to))
 				mis[token].Vote(1)
-				vote := mhs[token].GetTop()
+				vote := mrs[token].GetTop()
 				pp := pps[to]
 				for _, other := range ids {
 					if other != to {
 						r, f := ft2rf(other, to)
 						if other == from {
 							if !reflect.DeepEqual(pp.GetUpdate(r, f), newUpdate(f, 1, pp.collector[token], 0, vote)) {
-								t.Errorf("vote=%v, rack=%s, file=%s: should receive vote", from, r, f)
+								t.Fatalf("vote=%v, rack=%s, file=%s: should receive vote", from, r, f)
 							}
 						} else {
 							if !reflect.DeepEqual(pp.GetUpdate(r, f), noUpdate(f)) {
-								t.Errorf("vote=%v, rack='%s', file='%s': should get no update", from, r, f)
+								t.Fatalf("vote=%v, rack='%s', file='%s': should get no update", from, r, f)
 							}
 						}
 					}
@@ -56,43 +55,188 @@ func TestVoteUpdate(t *testing.T) {
 	}
 }
 
-func TestPrimitiveProvider_Write(t *testing.T) {
-	type fields struct {
-		reader    map[string]*updater
-		writer    map[string]IMFWriter
-		collector map[string]Collector
-	}
-	type args struct {
-		rack    string
-		file    string
-		message *raftpb.Message
-	}
-	tests := []struct {
-		name    string
-		fields  fields
-		args    args
-		wantErr bool
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pvd := &PrimitiveProvider{
-				reader:    tt.fields.reader,
-				writer:    tt.fields.writer,
-				collector: tt.fields.collector,
+func TestAppendUpdate(t *testing.T) {
+	ids := []uint64{0, 1, 2, 3, 4}
+	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, false, true)
+
+	for _, from := range ids {
+		for _, to := range ids {
+			if from != to {
+				token := rf2t(ft2rf(from, to))
+				mis[token].AutoVote().AutoAppend()
+				app := mrs[token].GetTop()
+				pp := pps[to]
+				for _, other := range ids {
+					if other != to {
+						r, f := ft2rf(other, to)
+						if other == from {
+							u := pp.GetUpdate(r, f)
+
+							if u.VoteMsg != nil {
+								t.Fatalf("append=%v, rack=%s, file=%s: should receive no vote", from, r, f)
+							}
+
+							ok, ent, lt, li := u.Collected.FetchAllEntries()
+							if !ok || lt != app.LogTerm || li != app.Index || !reflect.DeepEqual(ent, app.Entries) {
+								oks := fmt.Sprintf("[%v/%v]", ok, true)
+								ents := fmt.Sprintf("ent=[%+v/%+v]", ent, app.Entries)
+								lts := fmt.Sprintf("logTerm=[%v/%v]", lt, app.LogTerm)
+								lis := fmt.Sprintf("logIndex=[%v/%v]", li, app.Index)
+								t.Fatalf("append=%v, rack=%s, file=%s: collector borkened \n==>%s\t%s\t%s\t%s", from, r, f, oks, ents, lts, lis)
+							}
+
+							if !reflect.DeepEqual(u, newUpdate(f, app.Term, pp.collector[token], app.Commit, nil)) {
+								t.Fatalf("append=%v, rack=%s, file=%s: should receive appropriate append", from, r, f)
+							}
+						} else {
+							if !reflect.DeepEqual(pp.GetUpdate(r, f), noUpdate(f)) {
+								t.Fatalf("vote=%v, rack='%s', file='%s': should get no update", from, r, f)
+							}
+						}
+					}
+				}
 			}
-			if err := pvd.Write(tt.args.rack, tt.args.file, tt.args.message); (err != nil) != tt.wantErr {
-				t.Errorf("Write() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
+		}
 	}
 }
 
-func preparation(storage *mockingIMFStorage, ids []uint64, history bool) (map[uint64]*PrimitiveProvider, map[string]*mockingIMFInjector, map[string]*mockingIMFInjectorHistory) {
+func TestVoteWrite(t *testing.T) {
+	ids := []uint64{0, 1, 2, 3, 4}
+	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
+
+	for _, host := range ids {
+		pp := pps[host]
+
+		votes := make(map[uint64]*raftpb.Message)
+
+		for _, to := range ids {
+			r, f := ft2rf(host, to)
+			token := rf2t(r, f)
+			mis[token].AutoVote()
+			vote := mrs[token].GetTop()
+
+			pp.Write(r, f, vote)
+			votes[to] = vote
+		}
+
+		for _, other := range ids {
+			ppo := pps[other]
+			for _, to := range ids {
+				for _, from := range ids {
+					if from == other {
+						continue
+					}
+
+					r, f := ft2rf(from, to)
+					if from == host {
+						if !reflect.DeepEqual(votes[to], ppo.GetUpdate(r, f).VoteMsg) {
+							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should receive vote", other, from, r, f)
+						}
+					} else {
+						if !ppo.GetUpdate(r, f).ZeroDelta {
+							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should no receive vote", other, from, r, f)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestAppendWrite(t *testing.T) {
+	ids := []uint64{0, 1, 2, 3, 4}
+	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
+
+	for _, host := range ids {
+		pp := pps[host]
+
+		appends := make(map[uint64]*raftpb.Message)
+
+		for _, to := range ids {
+			r, f := ft2rf(host, to)
+			token := rf2t(r, f)
+			mis[token].AutoVote().AutoAppend()
+			a := mrs[token].GetTop()
+
+			pp.Write(r, f, a)
+			appends[to] = a
+		}
+
+		for _, other := range ids {
+			ppo := pps[other]
+			for _, to := range ids {
+				for _, from := range ids {
+					if from == other {
+						continue
+					}
+
+					r, f := ft2rf(from, to)
+					if from == host {
+						u := ppo.GetUpdate(r, f)
+
+						_, ent, lt, li := u.Collected.FetchAllEntries()
+						if !reflect.DeepEqual(appends[to].Entries, ent) {
+							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should receive vote", other, from, r, f)
+						}
+
+						if appends[to].LogTerm != lt {
+							//
+						}
+
+						if appends[to].Index != li {
+							//
+						}
+
+					} else {
+						if !ppo.GetUpdate(r, f).ZeroDelta {
+							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should no receive vote", other, from, r, f)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestUpdateCollectedEntries(t *testing.T) {
+	ids := []uint64{0, 1, 2, 3, 4}
+	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
+
+	plt := uint64(3)
+	pli := uint64(4)
+	entries := []uint64{3, 3, 4, 4, 5, 7, 7}
+
+	mes := newMockingEntrySplitter(generateEntries(plt, pli, entries))
+
+	leader := uint64(0)
+	follower := uint64(1)
+
+	lpp := pps[leader]
+	r, f := ft2rf(leader, follower)
+	token := rf2t(r, f)
+
+	mi := mis[token].AutoVote()
+	for i := 0; i < len(entries); i++ {
+		mi.Append(mes.NextOneStep())
+	}
+
+	for _, m := range mrs[token].GetAll() {
+		lpp.Write(r, f, m)
+	}
+
+	u := pps[follower].GetUpdate(r, f)
+	_, ent, lt, li := u.Collected.FetchAllEntries()
+
+	if plt != lt || pli != li || !reflect.DeepEqual(entries, ent) {
+		t.Fatalf("entry is incorrectly collected")
+	}
+
+}
+
+func preparation(storage *mockingIMFStorage, ids []uint64, dropInject bool, usingInjectRec bool) (map[uint64]*PrimitiveProvider, map[string]*mockingIMFInjector, map[string]*mockingIMFInjectorRec) {
 	pps := make(map[uint64]*PrimitiveProvider)
 	mis := make(map[string]*mockingIMFInjector)
-	mhs := make(map[string]*mockingIMFInjectorHistory)
+	mrs := make(map[string]*mockingIMFInjectorRec)
 
 	for _, host := range ids {
 		pp := NewPrimitiveProvider()
@@ -112,79 +256,25 @@ func preparation(storage *mockingIMFStorage, ids []uint64, history bool) (map[ui
 	for _, from := range ids {
 		for _, to := range ids {
 			r, f := ft2rf(from, to)
-			if history {
-				his := &mockingIMFInjectorHistory{}
-				mhs[rf2t(r, f)] = his
-				mis[rf2t(r, f)] = newMockingMemorableIMFInjector(his).UseMemorable(storage.OfferWriteGrant(rf2t(r, f))).InitAs(0, from, to, 0, 0)
+			var writer IMFWriter
+
+			if dropInject {
+				writer = storage.OfferRedirectedWriteGrant(rf2t(r, f), func(message *raftpb.Message) error { return nil })
 			} else {
-				mis[rf2t(r, f)] = newMockingIMFInjector().Use(storage.OfferWriteGrant(rf2t(r, f))).InitAs(0, from, to, 0, 0)
+				writer = storage.OfferWriteGrant(rf2t(r, f))
+			}
+
+			if usingInjectRec {
+				his := &mockingIMFInjectorRec{}
+				mrs[rf2t(r, f)] = his
+
+				mis[rf2t(r, f)] = newMockingMemorableIMFInjector(his).UseMemorable(writer).InitAs(0, from, to, 0, 0)
+			} else {
+				mis[rf2t(r, f)] = newMockingIMFInjector().Use(writer).InitAs(0, from, to, 0, 0)
 			}
 
 		}
 	}
 
-	return pps, mis, mhs
-}
-
-func ft2rf(from, to uint64) (rack, file string) {
-	file = "F" + strconv.Itoa(int(from))
-	rack = "R" + strconv.Itoa(int(to))
-
-	return rack, file
-}
-
-func rf2t(rack, file string) (token string) {
-	token = filepath.Join(rack, file)
-	return token
-}
-
-func GenerateRackFileNames(size int) (string, []string, string, []string) {
-	lRack := "R0"
-	rRacks := make([]string, size-1)
-	for i := 0; i < size-1; i++ {
-		rRacks[i] = "R" + strconv.Itoa(i+1)
-	}
-
-	lFile := "F0"
-	rFiles := make([]string, size-1)
-	for i := 0; i < size-1; i++ {
-		rFiles[i] = "F" + strconv.Itoa(i+1)
-	}
-
-	return lRack, rRacks, lFile, rFiles
-}
-
-func OfferWriterGrant(r string, f string, wg func(key string) IMFWriter) map[string]IMFWriter {
-	res := make(map[string]IMFWriter)
-	sig := filepath.Join(r, f)
-	res[sig] = wg(sig)
-
-	return res
-}
-
-func OfferReaderGrant(r string, fs []string, rg func(key string) IMFReader) map[string]*updater {
-	res := make(map[string]*updater)
-	for _, f := range fs {
-		sig := filepath.Join(r, f)
-		res[sig] = &updater{
-			next:   0,
-			reader: rg(sig),
-		}
-	}
-
-	return res
-}
-
-func OfferCollectors(r string, fs []string, cg func(key string) Collector) map[string]Collector {
-	res := make(map[string]Collector)
-	for _, f := range fs {
-		sig := filepath.Join(r, f)
-		res[sig] = cg(sig)
-	}
-
-	return res
-}
-
-var defaultCollectorGenerator = func(key string) Collector {
-	return NewEntryFragmentCollector(true)
+	return pps, mis, mrs
 }
