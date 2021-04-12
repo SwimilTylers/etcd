@@ -212,7 +212,7 @@ func (c *SimplifiedRaftLogCollector) addEntries(entries []raftpb.Entry, logTerm,
 		return true, false
 	}
 
-	if logIndex >= c.nextIndex {
+	if logIndex > c.nextIndex {
 		return false, false
 	}
 
@@ -249,7 +249,7 @@ func (c *SimplifiedRaftLogCollector) addEntries(entries []raftpb.Entry, logTerm,
 		c.content = append(c.content, entries...)
 	}
 
-	c.nextIndex = entries[newLen-1].Index
+	c.nextIndex = entries[newLen-1].Index + 1
 
 	return true, truncated
 }
@@ -314,6 +314,7 @@ func (c *SimplifiedRaftLogCollector) resize(length int, logTerm, logIndex uint64
 		content := make([]raftpb.Entry, length, 2*length)
 		copy(content, c.content[:length])
 		c.copied = true
+		c.content = content
 	} else {
 		c.content = c.content[:length]
 	}
