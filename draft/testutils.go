@@ -3,6 +3,7 @@ package draft
 import (
 	"fmt"
 	"go.etcd.io/etcd/raft/raftpb"
+	"math/rand"
 	"path/filepath"
 	"strconv"
 )
@@ -98,6 +99,21 @@ func generateEntries(prevLogTerm, prevLogIndex uint64, desc []uint64) (uint64, u
 	}
 
 	return prevLogTerm, prevLogIndex, res
+}
+
+func generateEntryDesc(size int, rnd *rand.Rand) (uint64, uint64, []uint64) {
+	plt := rnd.Uint64() & 0xffffffff
+	pli := rnd.Uint64() & 0xffff
+
+	term := plt + (rnd.Uint64() & 0xff)
+
+	res := make([]uint64, size)
+	for i := 0; i < size; i++ {
+		res[i] = term
+		term += rnd.Uint64() & 0xff
+	}
+
+	return plt, pli, res
 }
 
 var defaultCollectorGenerator = func(key string) Collector {

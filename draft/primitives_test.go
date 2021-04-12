@@ -3,7 +3,9 @@ package draft
 import (
 	"fmt"
 	"go.etcd.io/etcd/raft/raftpb"
+	"math/rand"
 	"reflect"
+	"strconv"
 	"testing"
 )
 
@@ -200,13 +202,45 @@ func TestAppendWrite(t *testing.T) {
 
 func TestUpdateCollectedEntries(t *testing.T) {
 	ids := []uint64{0, 1, 2, 3, 4}
+	round := 10
+
+	for i := 0; i < round; i++ {
+		seed := rand.Int63()
+		rnd := rand.New(rand.NewSource(seed))
+		t.Run("", func(t *testing.T) {
+			pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
+
+			plt, pli, entries := generateEntryDesc(5+rnd.Intn(15), rnd)
+
+			leader := uint64(0)
+			follower := uint64(1)
+
+			lpp := pps[leader]
+			r, f := ft2rf(leader, follower)
+			token := rf2t(r, f)
+
+			mes, _ := appendRandomWalk(plt, pli, entries, mis[token].AutoVote(), rnd)
+			for _, m := range mrs[token].GetAll() {
+				lpp.Write(r, f, m)
+			}
+
+			u := pps[follower].GetUpdate(r, f)
+
+			if !mes.EquivEntrySeq(u.Collected) {
+				t.Errorf("entry is incorrectly collected: seed=%v", seed)
+			}
+		})
+	}
+}
+
+func TestUpdateCollectedEntriesOnce(t *testing.T) {
+	ids := []uint64{0, 1, 2, 3, 4}
+	var seed int64 = 2933568871211445515
+	rnd := rand.New(rand.NewSource(seed))
+
 	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
 
-	plt := uint64(3)
-	pli := uint64(4)
-	entries := []uint64{3, 3, 4, 4, 5, 7, 7}
-
-	mes := newMockingEntrySplitter(generateEntries(plt, pli, entries))
+	plt, pli, entries := generateEntryDesc(5+rnd.Intn(15), rnd)
 
 	leader := uint64(0)
 	follower := uint64(1)
@@ -215,22 +249,61 @@ func TestUpdateCollectedEntries(t *testing.T) {
 	r, f := ft2rf(leader, follower)
 	token := rf2t(r, f)
 
-	mi := mis[token].AutoVote()
-	for i := 0; i < len(entries); i++ {
-		mi.Append(mes.NextOneStep())
-	}
-
+	mes, actions := appendRandomWalk(plt, pli, entries, mis[token].AutoVote(), rnd)
 	for _, m := range mrs[token].GetAll() {
 		lpp.Write(r, f, m)
 	}
 
 	u := pps[follower].GetUpdate(r, f)
-	_, ent, lt, li := u.Collected.FetchAllEntries()
 
-	if plt != lt || pli != li || !reflect.DeepEqual(entries, ent) {
-		t.Fatalf("entry is incorrectly collected")
+	if !mes.EquivEntrySeq(u.Collected) {
+		t.Errorf("entry is incorrectly collected: [%v, %v, %v], actions=%v", plt, pli, entries, actions)
+	}
+}
+
+func appendRandomWalk(logTerm, logIndex uint64, entries []uint64, mi *mockingIMFInjector, rnd *rand.Rand) (*mockingEntrySplitter, []string) {
+	mes := newMockingEntrySplitter(generateEntries(logTerm, logIndex, entries))
+	var actionS []string
+
+	length := len(entries)
+
+	action := [][]func(){
+		{
+			func() { mi.Append(mes.NextOneStep()); actionS = append(actionS, "p++") },
+			func() {
+				step := 1 + rnd.Intn(length)
+				mi.Append(mes.Next(step))
+				actionS = append(actionS, "p+="+strconv.Itoa(step))
+			},
+			func() { mi.Append(mes.NextAll()); actionS = append(actionS, "p=all") },
+			func() { mi.Append(mes.NextTrivial()); actionS = append(actionS, "p+=0") },
+		},
+		{
+			func() {
+				step := mes.MoveBackwards(1 + rnd.Intn(length))
+				actionS = append(actionS, "i-="+strconv.Itoa(step))
+			},
+			func() { mes.MoveBackToZero(); actionS = append(actionS, "i=0") },
+		},
+		{
+			func() {
+				step := mes.CommitForwards(1 + rnd.Intn(length))
+				actionS = append(actionS, "c+="+strconv.Itoa(step))
+			},
+			func() { mes.CommitMost(); actionS = append(actionS, "c=all") },
+		},
 	}
 
+	for !mes.IsCommitAll() {
+		n, m := rnd.Int(), rnd.Int()
+
+		n %= len(action)
+		m %= len(action[n])
+
+		action[n][m]()
+	}
+
+	return mes, actionS
 }
 
 func preparation(storage *mockingIMFStorage, ids []uint64, dropInject bool, usingInjectRec bool) (map[uint64]*PrimitiveProvider, map[string]*mockingIMFInjector, map[string]*mockingIMFInjectorRec) {
