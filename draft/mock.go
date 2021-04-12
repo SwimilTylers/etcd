@@ -340,6 +340,7 @@ type mockingEntrySplitter struct {
 
 	entLen       int
 	nextStartIdx int
+	progress     int
 	commitUpTo   int
 }
 
@@ -350,11 +351,12 @@ func newMockingEntrySplitter(logTerm uint64, logIndex uint64, ent []raftpb.Entry
 		ent:          ent,
 		entLen:       len(ent),
 		nextStartIdx: 0,
+		progress:     0,
 		commitUpTo:   -1,
 	}
 }
 
-func (mes *mockingEntrySplitter) Next(maxLen int) (uint64, uint64, uint64, []raftpb.Entry) {
+func (mes *mockingEntrySplitter) Next(progressPromote int) (uint64, uint64, uint64, []raftpb.Entry) {
 	var commit uint64
 	if mes.commitUpTo == -1 {
 		commit = mes.logIndex
@@ -380,10 +382,12 @@ func (mes *mockingEntrySplitter) Next(maxLen int) (uint64, uint64, uint64, []raf
 	}
 
 	start := mes.nextStartIdx
-	mes.nextStartIdx += maxLen
-	if mes.nextStartIdx > mes.entLen {
-		mes.nextStartIdx = mes.entLen
+	mes.progress += progressPromote
+	if mes.progress > mes.entLen {
+		mes.progress = mes.entLen
 	}
+
+	mes.nextStartIdx = mes.progress
 
 	return commit, lt, li, mes.ent[start:mes.nextStartIdx]
 }
@@ -400,34 +404,39 @@ func (mes *mockingEntrySplitter) NextAll() (uint64, uint64, uint64, []raftpb.Ent
 	return mes.Next(mes.entLen)
 }
 
-func (mes *mockingEntrySplitter) CommitInc(delta int) {
+func (mes *mockingEntrySplitter) CommitForwards(delta int) int {
+	commit := mes.commitUpTo
 	mes.commitUpTo += delta
 
-	if mes.commitUpTo >= mes.entLen {
-		mes.commitUpTo = mes.entLen - 1
+	if mes.commitUpTo >= mes.progress {
+		mes.commitUpTo = mes.progress - 1
 	}
+
+	return mes.commitUpTo - commit
 }
 
 func (mes *mockingEntrySplitter) CommitMost() {
-	mes.CommitInc(mes.entLen)
+	mes.CommitForwards(mes.entLen)
 }
 
 func (mes *mockingEntrySplitter) IsCommitAll() bool {
-	return mes.commitUpTo != mes.entLen
+	return mes.commitUpTo == mes.entLen-1
 }
 
-func (mes *mockingEntrySplitter) MoveBack(step int) {
+func (mes *mockingEntrySplitter) MoveBackwards(step int) int {
+	start := mes.nextStartIdx
 	mes.nextStartIdx -= step
 	if mes.nextStartIdx < 0 {
 		mes.nextStartIdx = 0
 	}
+	return start - mes.nextStartIdx
 }
 
 func (mes *mockingEntrySplitter) MoveBackToZero() {
-	mes.MoveBack(mes.entLen)
+	mes.MoveBackwards(mes.entLen)
 }
 
-func (mes *mockingEntrySplitter) CompareEntryFragment(o ...interface{}) bool {
+func (mes *mockingEntrySplitter) EquivEntrySeq(o ...interface{}) bool {
 	if len(o) == 1 {
 		switch o[0].(type) {
 		case *mockingEntrySplitter:
@@ -439,7 +448,14 @@ func (mes *mockingEntrySplitter) CompareEntryFragment(o ...interface{}) bool {
 		case ConsecutiveEntryCollector:
 			c := o[0].(ConsecutiveEntryCollector)
 			_, ent, lt, li := c.FetchAllEntries()
-			return mes.CompareEntryFragment(lt, li, ent)
+			return mes.EquivEntrySeq(lt, li, ent)
+		case *EntryFragmentCollector:
+			c := o[0].(*EntryFragmentCollector)
+			ok, fs := c.FetchAllFragments()
+			if !ok || len(fs) != 1 {
+				return false
+			}
+			return mes.EquivEntrySeq(fs[0])
 		}
 	} else if len(o) == 3 {
 		logTerm := o[0].(uint64)
