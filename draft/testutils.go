@@ -116,6 +116,25 @@ func generateEntryDesc(size int, rnd *rand.Rand) (uint64, uint64, []uint64) {
 	return plt, pli, res
 }
 
+func extendEntryDesc(extSize int, rnd *rand.Rand, logTerm, logIndex uint64, entries []uint64) (uint64, uint64, []uint64) {
+	term := logTerm + (rnd.Uint64() & 0xff)
+	bLen := len(entries)
+
+	if bLen != 0 {
+		term = entries[bLen-1] + (rnd.Uint64() & 0xff)
+	}
+
+	res := make([]uint64, bLen, bLen+extSize)
+	copy(res, entries)
+
+	for i := bLen; i < len(res); i++ {
+		res[i] = term
+		term += rnd.Uint64() & 0xff
+	}
+
+	return logTerm, logIndex, res
+}
+
 var defaultCollectorGenerator = func(key string) Collector {
 	return NewEntryFragmentCollector(true)
 }

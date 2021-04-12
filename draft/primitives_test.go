@@ -208,26 +208,13 @@ func TestUpdateCollectedEntries(t *testing.T) {
 		seed := rand.Int63()
 		rnd := rand.New(rand.NewSource(seed))
 		t.Run("", func(t *testing.T) {
-			pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
-
-			plt, pli, entries := generateEntryDesc(5+rnd.Intn(15), rnd)
-
-			leader := uint64(0)
-			follower := uint64(1)
-
-			lpp := pps[leader]
-			r, f := ft2rf(leader, follower)
-			token := rf2t(r, f)
-
-			mes, _ := appendRandomWalk(plt, pli, entries, mis[token].AutoVote(), rnd)
-			for _, m := range mrs[token].GetAll() {
-				lpp.Write(r, f, m)
-			}
-
-			u := pps[follower].GetUpdate(r, f)
-
+			mes, u, _ := runTestUpdateCollectedEntries(ids, rnd)
 			if !mes.EquivEntrySeq(u.Collected) {
 				t.Errorf("entry is incorrectly collected: seed=%v", seed)
+			}
+			mes0, mes1, uu, _ := runTestUpdateCollectedEntriesOverride(ids, rnd)
+			if !mes0.EquivEntrySeq(uu.Collected) && !mes1.EquivEntrySeq(uu.Collected) {
+				t.Errorf("joint entry is incorrectly collected: seed=%v", seed)
 			}
 		})
 	}
@@ -238,6 +225,19 @@ func TestUpdateCollectedEntriesOnce(t *testing.T) {
 	var seed int64 = 2933568871211445515
 	rnd := rand.New(rand.NewSource(seed))
 
+	mes, u, actions := runTestUpdateCollectedEntries(ids, rnd)
+
+	if !mes.EquivEntrySeq(u.Collected) {
+		t.Errorf("entry is incorrectly collected: len=%v, actions=%v", mes.entLen, actions)
+	}
+
+	mes0, mes1, uu, actions0 := runTestUpdateCollectedEntriesOverride(ids, rnd)
+	if !mes0.EquivEntrySeq(uu.Collected) && !mes1.EquivEntrySeq(uu.Collected) {
+		t.Errorf("entry is incorrectly collected: len0=%v, len1=%v, actions=%v", mes0.entLen, mes1.entLen, actions0)
+	}
+}
+
+func runTestUpdateCollectedEntries(ids []uint64, rnd *rand.Rand) (*mockingEntrySplitter, *Update, []string) {
 	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
 
 	plt, pli, entries := generateEntryDesc(5+rnd.Intn(15), rnd)
@@ -256,9 +256,39 @@ func TestUpdateCollectedEntriesOnce(t *testing.T) {
 
 	u := pps[follower].GetUpdate(r, f)
 
-	if !mes.EquivEntrySeq(u.Collected) {
-		t.Errorf("entry is incorrectly collected: [%v, %v, %v], actions=%v", plt, pli, entries, actions)
+	return mes, u, actions
+}
+
+func runTestUpdateCollectedEntriesOverride(ids []uint64, rnd *rand.Rand) (*mockingEntrySplitter, *mockingEntrySplitter, *Update, []string) {
+	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
+
+	plt, pli, entries := generateEntryDesc(5+rnd.Intn(15), rnd)
+	eLen := len(entries)
+	_, _, entries0 := extendEntryDesc(rnd.Intn(15), rnd, plt, pli, entries[:rnd.Intn(eLen+1)])
+
+	leader := uint64(0)
+	follower := uint64(1)
+
+	lpp := pps[leader]
+	r, f := ft2rf(leader, follower)
+	token := rf2t(r, f)
+
+	mes0, actions0 := appendRandomWalk(plt, pli, entries, mis[token].AutoVote(), rnd)
+	mes1, actions1 := appendRandomWalk(plt, pli, entries0, mis[token].AutoVote(), rnd)
+
+	var actions []string
+	actions = append(actions, "[0]")
+	actions = append(actions, actions0...)
+	actions = append(actions, "[1]")
+	actions = append(actions, actions1...)
+
+	for _, m := range mrs[token].GetAll() {
+		lpp.Write(r, f, m)
 	}
+
+	u := pps[follower].GetUpdate(r, f)
+
+	return mes0, mes1, u, actions
 }
 
 func appendRandomWalk(logTerm, logIndex uint64, entries []uint64, mi *mockingIMFInjector, rnd *rand.Rand) (*mockingEntrySplitter, []string) {
