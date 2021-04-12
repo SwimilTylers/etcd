@@ -202,7 +202,7 @@ func TestAppendWrite(t *testing.T) {
 
 func TestUpdateCollectedEntries(t *testing.T) {
 	ids := []uint64{0, 1, 2, 3, 4}
-	round := 10
+	round := 15
 
 	for i := 0; i < round; i++ {
 		seed := rand.Int63()
@@ -269,6 +269,7 @@ func appendRandomWalk(logTerm, logIndex uint64, entries []uint64, mi *mockingIMF
 
 	action := [][]func(){
 		{
+			// normal appending
 			func() { mi.Append(mes.NextOneStep()); actionS = append(actionS, "p++") },
 			func() {
 				step := 1 + rnd.Intn(length)
@@ -279,6 +280,7 @@ func appendRandomWalk(logTerm, logIndex uint64, entries []uint64, mi *mockingIMF
 			func() { mi.Append(mes.NextTrivial()); actionS = append(actionS, "p+=0") },
 		},
 		{
+			// resend entries
 			func() {
 				step := mes.MoveBackwards(1 + rnd.Intn(length))
 				actionS = append(actionS, "i-="+strconv.Itoa(step))
@@ -286,15 +288,36 @@ func appendRandomWalk(logTerm, logIndex uint64, entries []uint64, mi *mockingIMF
 			func() { mes.MoveBackToZero(); actionS = append(actionS, "i=0") },
 		},
 		{
+			// commit forwarding
 			func() {
 				step := mes.CommitForwards(1 + rnd.Intn(length))
 				actionS = append(actionS, "c+="+strconv.Itoa(step))
 			},
 			func() { mes.CommitMost(); actionS = append(actionS, "c=all") },
 		},
+		{
+			// lagged appending
+			func() {
+				pStep := 1 + rnd.Intn(length)
+				mes.SetDispatchService(false)
+				mes.Next(pStep)
+				mes.SetDispatchService(true)
+				iStep := mes.MoveBackwards(1 + rnd.Intn(length))
+				mi.Append(mes.NextTrivial())
+				actionS = append(actionS, "(p+="+strconv.Itoa(pStep)+",i-="+strconv.Itoa(iStep)+")")
+			},
+			func() {
+				mes.SetDispatchService(false)
+				mes.NextAll()
+				mes.SetDispatchService(true)
+				step := mes.MoveBackwards(1 + rnd.Intn(length))
+				mi.Append(mes.NextTrivial())
+				actionS = append(actionS, "(p=all,i-="+strconv.Itoa(step)+")")
+			},
+		},
 	}
 
-	for !mes.IsCommitAll() {
+	for !mes.IsCommitAll() || !mes.IsDispatchAll() {
 		n, m := rnd.Int(), rnd.Int()
 
 		n %= len(action)

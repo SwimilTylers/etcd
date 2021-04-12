@@ -342,17 +342,24 @@ type mockingEntrySplitter struct {
 	nextStartIdx int
 	progress     int
 	commitUpTo   int
+
+	enableDispatch bool
+	dispatched     []bool
+}
+
+func (mes *mockingEntrySplitter) SetDispatchService(enableDispatch bool) {
+	mes.enableDispatch = enableDispatch
 }
 
 func newMockingEntrySplitter(logTerm uint64, logIndex uint64, ent []raftpb.Entry) *mockingEntrySplitter {
 	return &mockingEntrySplitter{
-		logTerm:      logTerm,
-		logIndex:     logIndex,
-		ent:          ent,
-		entLen:       len(ent),
-		nextStartIdx: 0,
-		progress:     0,
-		commitUpTo:   -1,
+		logTerm:        logTerm,
+		logIndex:       logIndex,
+		ent:            ent,
+		entLen:         len(ent),
+		commitUpTo:     -1,
+		enableDispatch: true,
+		dispatched:     make([]bool, len(ent)),
 	}
 }
 
@@ -389,6 +396,12 @@ func (mes *mockingEntrySplitter) Next(progressPromote int) (uint64, uint64, uint
 
 	mes.nextStartIdx = mes.progress
 
+	if mes.enableDispatch && start < mes.nextStartIdx {
+		for i := start; i < mes.nextStartIdx; i++ {
+			mes.dispatched[i] = true
+		}
+	}
+
 	return commit, lt, li, mes.ent[start:mes.nextStartIdx]
 }
 
@@ -421,6 +434,20 @@ func (mes *mockingEntrySplitter) CommitMost() {
 
 func (mes *mockingEntrySplitter) IsCommitAll() bool {
 	return mes.commitUpTo == mes.entLen-1
+}
+
+func (mes *mockingEntrySplitter) IsDispatchAll() bool {
+	if mes.entLen == 0 {
+		return true
+	}
+
+	for _, dispatch := range mes.dispatched {
+		if !dispatch {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (mes *mockingEntrySplitter) MoveBackwards(step int) int {
