@@ -1,58 +1,48 @@
-package draft
+package collector
 
 import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
-type CollectorBriefSegment struct {
-	Term        uint64
-	PrevLogTerm uint64
-	FirstIndex  uint64
-	LastIndex   uint64
+type Refresher interface {
+	//IsEmpty checks if the collector is empty.
+	IsEmpty() bool
+
+	//Refresh removes all internal status.
+	Refresh()
 }
 
-//CombineCollectorBriefSegment provides a lightweight approach for entry appending and
-// conflict resolution at the level of CollectorBriefSegment arrays.
-func CombineCollectorBriefSegment(s0, s1 []*CollectorBriefSegment) []*CollectorBriefSegment {
-	panic("implement me")
-}
-
-//Collector works for Entry Appending and Conflict Resolution
+//Collector works for Entry Appending and Conflict Resolution. It only deals with logTerm, logIndex and []Entry.
 type Collector interface {
 	//AddEntries collects entries and resolve potential conflict. This might cause
 	// the modification of internal structure. Return false if failed to attach new entries.
 	AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool
 
 	//FetchEntries fetches all the entries with the request term, as well as their
-	// previous logTerm and logIndex. Return false if no such an entry.
+	// previous LogTerm and LogIndex. Return false if no such an entry.
 	FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64)
 
 	//FetchEntriesWithStartIndex fetches entries with index >= startIndex, as well as their
-	// previous logTerm and logIndex. Return false if no such an entry.
+	// previous LogTerm and LogIndex. Return false if no such an entry.
 	FetchEntriesWithStartIndex(startIndex uint64) (bool, []raftpb.Entry, uint64, uint64)
 
 	//FetchAllEntries fetches all entries from internal structure. Return false if it is empty.
 	FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64)
 
-	//Refresh removes all internal status.
-	Refresh()
-
-	//Briefing makes a brief report of the collector.
-	Briefing() []*CollectorBriefSegment
-
-	//IsEmpty checks if the collector is empty.
-	IsEmpty() bool
+	Briefer
+	Refresher
 }
 
+//ConsecutiveEntryCollector is a subtype of Collector. The entry it contains MUST be consecutively increasing.
 type ConsecutiveEntryCollector interface {
 	Collector
 	EntrySize() int
 	GetLatestTerm() (bool, uint64)
 }
 
-//SimplifiedRaftLogCollector is an implementation of Collector. It maintains an entry array
-// with consecutive indices. During the process of AddEntries, it might reinitialize the
-// internal array or truncate the internal array. If new entries are not appendable even
+//SimplifiedRaftLogCollector is an implementation of ConsecutiveEntryCollector. It maintains
+// an entry array with consecutive indices. During the process of AddEntries, it might reinitialize
+// the internal array or truncate the internal array. If new entries are not appendable even
 // after those steps, the collector will not take in these entries for the maintenance of
 // consecutive-ness.
 type SimplifiedRaftLogCollector struct {
@@ -69,7 +59,7 @@ type SimplifiedRaftLogCollector struct {
 	}
 }
 
-func NewConsecutiveEntryCollector() *SimplifiedRaftLogCollector {
+func NewSimplifiedRaftLogCollector() *SimplifiedRaftLogCollector {
 	return &SimplifiedRaftLogCollector{copied: false}
 }
 
@@ -140,12 +130,12 @@ func (c *SimplifiedRaftLogCollector) Refresh() {
 	c.destroyCachedTable()
 }
 
-func (c *SimplifiedRaftLogCollector) Briefing() []*CollectorBriefSegment {
+func (c *SimplifiedRaftLogCollector) Briefing() []*BriefSegment {
 	if c.content == nil {
 		return nil
 	}
 
-	var result []*CollectorBriefSegment
+	var result []*BriefSegment
 	left := 0
 	logTerm := c.logTerm
 	cLen := len(c.content)
@@ -157,7 +147,7 @@ func (c *SimplifiedRaftLogCollector) Briefing() []*CollectorBriefSegment {
 	for left < cLen {
 		term := c.content[left].Term
 		_, right := c.locateLastEntryWithTerm(term, left, cLen)
-		result = append(result, &CollectorBriefSegment{
+		result = append(result, &BriefSegment{
 			Term:        term,
 			PrevLogTerm: logTerm,
 			FirstIndex:  c.content[left].Index,
@@ -462,24 +452,15 @@ func (c *SimplifiedRaftLogCollector) checkIfAppendable(logTerm, logIndex uint64)
 	return false
 }
 
-//EntryFragment represents an array of entries with consecutive indices.
-type EntryFragment struct {
-	logTerm  uint64
-	logIndex uint64
-
-	fragment []raftpb.Entry
-
-	latestTerm uint64
-}
-
 type subCollector struct {
 	ConsecutiveEntryCollector
-	brief []*CollectorBriefSegment
-	prev  *subCollector
-	next  *subCollector
+	brief     []*BriefSegment
+	guarantor uint64
+	prev      *subCollector
+	next      *subCollector
 }
 
-//EntryFragmentCollector is an implementation of Collector. It maintains a Collector list which allows
+//FragmentaryEntryCollector is an implementation of Collector. It allows
 // the combination of several disjoint entry fragments (EntryFragment). Each fragments is a collection of
 // entries with consecutive indices.
 //
@@ -488,7 +469,7 @@ type subCollector struct {
 // brief segments, etc.) from the internal list, or 2) SetRegularized changes regularized from false to true.
 // If you want to relieve the burden from regularization, make sure defaultRegOpt is true - the collector
 // will not allow the temporary overlapping during AddEntries.
-type EntryFragmentCollector struct {
+type FragmentaryEntryCollector struct {
 	head *subCollector
 	tail *subCollector
 
@@ -496,11 +477,11 @@ type EntryFragmentCollector struct {
 	defaultRegOpt bool
 }
 
-func NewEntryFragmentCollector(defaultRegOpt bool) *EntryFragmentCollector {
-	return &EntryFragmentCollector{defaultRegOpt: defaultRegOpt, regularized: defaultRegOpt}
+func NewFragmentaryEntryCollector(defaultRegOpt bool) *FragmentaryEntryCollector {
+	return &FragmentaryEntryCollector{defaultRegOpt: defaultRegOpt, regularized: defaultRegOpt}
 }
 
-func (c *EntryFragmentCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
+func (c *FragmentaryEntryCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
 	if c.regularized {
 		c.regularizedAddEntries(entries, logTerm, logIndex)
 	} else {
@@ -510,7 +491,7 @@ func (c *EntryFragmentCollector) AddEntries(entries []raftpb.Entry, logTerm uint
 	return true
 }
 
-func (c *EntryFragmentCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
+func (c *FragmentaryEntryCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -524,7 +505,7 @@ func (c *EntryFragmentCollector) FetchEntries(term uint64) (bool, []raftpb.Entry
 	return false, nil, 0, 0
 }
 
-func (c *EntryFragmentCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
+func (c *FragmentaryEntryCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -536,7 +517,7 @@ func (c *EntryFragmentCollector) FetchEntriesWithStartIndex(index uint64) (bool,
 	return c.head.next == nil, e, t, i
 }
 
-func (c *EntryFragmentCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
+func (c *FragmentaryEntryCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -548,7 +529,7 @@ func (c *EntryFragmentCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64
 	return c.head.next == nil, e, t, i
 }
 
-func (c *EntryFragmentCollector) Refresh() {
+func (c *FragmentaryEntryCollector) Refresh() {
 	if c.head == nil {
 		return
 	}
@@ -561,7 +542,7 @@ func (c *EntryFragmentCollector) Refresh() {
 	c.regularized = c.defaultRegOpt
 }
 
-func (c *EntryFragmentCollector) Briefing() []*CollectorBriefSegment {
+func (c *FragmentaryEntryCollector) Briefing() []*BriefSegment {
 	if c.head == nil {
 		return nil
 	}
@@ -577,23 +558,23 @@ func (c *EntryFragmentCollector) Briefing() []*CollectorBriefSegment {
 	return c.briefing()
 }
 
-func (c *EntryFragmentCollector) IsEmpty() bool {
+func (c *FragmentaryEntryCollector) IsEmpty() bool {
 	return c.head == nil || c.head.IsEmpty()
 }
 
-func (c *EntryFragmentCollector) DefaultRegOpt() bool {
+func (c *FragmentaryEntryCollector) DefaultRegOpt() bool {
 	return c.defaultRegOpt
 }
 
-func (c *EntryFragmentCollector) SetDefaultRegOpt(defaultRegOpt bool) {
+func (c *FragmentaryEntryCollector) SetDefaultRegOpt(defaultRegOpt bool) {
 	c.defaultRegOpt = defaultRegOpt
 }
 
-func (c *EntryFragmentCollector) Regularized() bool {
+func (c *FragmentaryEntryCollector) Regularized() bool {
 	return c.regularized
 }
 
-func (c *EntryFragmentCollector) SetRegularized(regularized bool) {
+func (c *FragmentaryEntryCollector) SetRegularized(regularized bool) {
 	if !c.regularized && regularized {
 		c.regularize()
 	}
@@ -601,69 +582,8 @@ func (c *EntryFragmentCollector) SetRegularized(regularized bool) {
 	c.regularized = regularized
 }
 
-//FetchFragmentsWithStartIndex fetches fragments with index >= startIndex. If part of some fragment
-// is not satisfied, truncate it. Return false if no such a fragment.
-func (c *EntryFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsEmpty() {
-		return false, nil
-	}
-
-	c.regularize()
-
-	frag := c.fetchFragments(index)
-
-	if len(frag) == 0 {
-		return false, nil
-	}
-
-	return true, frag
-}
-
-//FetchAllFragments fetches all fragments from the list. Return false if it is empty.
-func (c *EntryFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsEmpty() {
-		return false, nil
-	}
-
-	c.regularize()
-
-	return true, c.fetchFragments(0)
-}
-
-func (c *EntryFragmentCollector) fetchFragments(index uint64) []*EntryFragment {
-	var result []*EntryFragment
-	needle := c.head
-
-	meet := false
-
-	for needle != nil {
-		if !meet {
-			if ok, ent, logTerm, logIndex := needle.FetchEntriesWithStartIndex(index); ok {
-				meet = true
-				result = append(result, &EntryFragment{
-					logTerm:    logTerm,
-					logIndex:   logIndex,
-					fragment:   ent,
-					latestTerm: ent[len(ent)-1].Term,
-				})
-			}
-		} else {
-			_, ent, logTerm, logIndex := needle.FetchAllEntries()
-			result = append(result, &EntryFragment{
-				logTerm:    logTerm,
-				logIndex:   logIndex,
-				fragment:   ent,
-				latestTerm: ent[len(ent)-1].Term,
-			})
-		}
-		needle = needle.next
-	}
-
-	return result
-}
-
-func (c *EntryFragmentCollector) briefing() []*CollectorBriefSegment {
-	var result []*CollectorBriefSegment
+func (c *FragmentaryEntryCollector) briefing() []*BriefSegment {
+	var result []*BriefSegment
 
 	needle := c.head
 	for needle != nil {
@@ -677,7 +597,7 @@ func (c *EntryFragmentCollector) briefing() []*CollectorBriefSegment {
 	return result
 }
 
-func (c *EntryFragmentCollector) locateEntries(term uint64) Collector {
+func (c *FragmentaryEntryCollector) locateEntries(term uint64) Collector {
 	needle := c.head
 	for needle != nil {
 		if needle.brief == nil {
@@ -708,7 +628,7 @@ func (c *EntryFragmentCollector) locateEntries(term uint64) Collector {
 	return nil
 }
 
-func (c *EntryFragmentCollector) regularizedAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
+func (c *FragmentaryEntryCollector) regularizedAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
 	if c.head == nil {
 		c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 		return
@@ -731,7 +651,7 @@ func (c *EntryFragmentCollector) regularizedAddEntries(entries []raftpb.Entry, l
 	c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 }
 
-func (c *EntryFragmentCollector) addEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
+func (c *FragmentaryEntryCollector) addEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
 	if c.head == nil {
 		c.addSubCollectorAndMoveToTail()
 	}
@@ -743,7 +663,8 @@ func (c *EntryFragmentCollector) addEntries(entries []raftpb.Entry, logTerm uint
 	}
 }
 
-func (c *EntryFragmentCollector) regularize() {
+//todo: verify and make it compatible to guarantor fields
+func (c *FragmentaryEntryCollector) regularize() {
 	if c.regularized {
 		return
 	}
@@ -753,8 +674,6 @@ func (c *EntryFragmentCollector) regularize() {
 		return
 	}
 
-	// clear out buffered brief
-
 	for {
 		needle := c.head
 		regular := true
@@ -763,6 +682,7 @@ func (c *EntryFragmentCollector) regularize() {
 			if needle.brief == nil {
 				break
 			}
+			// clear out buffered brief
 			needle.brief = nil
 
 			if needle.IsEmpty() {
@@ -794,7 +714,7 @@ func (c *EntryFragmentCollector) regularize() {
 	c.regularized = true
 }
 
-func (c *EntryFragmentCollector) addSubCollectorAndMoveToTail() *subCollector {
+func (c *FragmentaryEntryCollector) addSubCollectorAndMoveToTail() *subCollector {
 	if c.head == nil {
 		c.head = &subCollector{ConsecutiveEntryCollector: &SimplifiedRaftLogCollector{}}
 		c.tail = c.head
@@ -806,7 +726,7 @@ func (c *EntryFragmentCollector) addSubCollectorAndMoveToTail() *subCollector {
 	return c.tail
 }
 
-func (c *EntryFragmentCollector) tryRemoveSubCollectorAndMoveToNext(sc *subCollector) *subCollector {
+func (c *FragmentaryEntryCollector) tryRemoveSubCollectorAndMoveToNext(sc *subCollector) *subCollector {
 	if c.head == sc {
 		if sc.next == nil {
 			return nil

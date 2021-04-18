@@ -2,6 +2,7 @@ package draft
 
 import (
 	"fmt"
+	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"math/rand"
 	"os"
@@ -469,15 +470,15 @@ func (mes *mockingEntrySplitter) EquivEntrySeq(o ...interface{}) bool {
 		case *mockingEntrySplitter:
 			m := o[0].(*mockingEntrySplitter)
 			return m.logTerm == mes.logTerm && m.logIndex == mes.logIndex && reflect.DeepEqual(m.ent, mes.ent)
-		case *EntryFragment:
-			f := o[0].(*EntryFragment)
-			return f.logTerm == mes.logTerm && f.logIndex == mes.logIndex && reflect.DeepEqual(f.fragment, mes.ent)
-		case ConsecutiveEntryCollector:
-			c := o[0].(ConsecutiveEntryCollector)
+		case *collector.EntryFragment:
+			f := o[0].(*collector.EntryFragment)
+			return f.LogTerm == mes.logTerm && f.LogIndex == mes.logIndex && reflect.DeepEqual(f.Fragment, mes.ent)
+		case collector.ConsecutiveEntryCollector:
+			c := o[0].(collector.ConsecutiveEntryCollector)
 			_, ent, lt, li := c.FetchAllEntries()
 			return mes.EquivEntrySeq(lt, li, ent)
-		case *EntryFragmentCollector:
-			c := o[0].(*EntryFragmentCollector)
+		case *collector.MultiFragmentsCollector:
+			c := o[0].(*collector.MultiFragmentsCollector)
 			ok, fs := c.FetchAllFragments()
 			if !ok || len(fs) != 1 {
 				return false

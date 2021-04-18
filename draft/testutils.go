@@ -2,6 +2,7 @@ package draft
 
 import (
 	"fmt"
+	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"math/rand"
 	"path/filepath"
@@ -57,8 +58,8 @@ func offerReaderGrant(r string, fs []string, rg func(key string) IMFReader) map[
 	return res
 }
 
-func offerCollectors(r string, fs []string, cg func(key string) Collector) map[string]Collector {
-	res := make(map[string]Collector)
+func offerCollectors(r string, fs []string, cg func(key string) collector.EntryFragmentCollector) map[string]collector.EntryFragmentCollector {
+	res := make(map[string]collector.EntryFragmentCollector)
 	for _, f := range fs {
 		sig := filepath.Join(r, f)
 		res[sig] = cg(sig)
@@ -133,8 +134,4 @@ func extendEntryDesc(extSize int, rnd *rand.Rand, logTerm, logIndex uint64, entr
 	}
 
 	return logTerm, logIndex, res
-}
-
-var defaultCollectorGenerator = func(key string) Collector {
-	return NewEntryFragmentCollector(true)
 }

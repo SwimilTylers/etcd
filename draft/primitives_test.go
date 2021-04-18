@@ -2,6 +2,7 @@ package draft
 
 import (
 	"fmt"
+	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"math/rand"
 	"reflect"
@@ -78,12 +79,13 @@ func TestAppendUpdate(t *testing.T) {
 								t.Fatalf("append=%v, rack=%s, file=%s: should receive no vote", from, r, f)
 							}
 
-							ok, ent, lt, li := u.Collected.FetchAllEntries()
+							ok, fs := u.Collected.FetchAllFragments()
+							ent, lt, li := fs[0].Fragment, fs[0].LogTerm, fs[0].LogIndex
 							if !ok || lt != app.LogTerm || li != app.Index || !reflect.DeepEqual(ent, app.Entries) {
 								oks := fmt.Sprintf("[%v/%v]", ok, true)
 								ents := fmt.Sprintf("ent=[%+v/%+v]", ent, app.Entries)
-								lts := fmt.Sprintf("logTerm=[%v/%v]", lt, app.LogTerm)
-								lis := fmt.Sprintf("logIndex=[%v/%v]", li, app.Index)
+								lts := fmt.Sprintf("LogTerm=[%v/%v]", lt, app.LogTerm)
+								lis := fmt.Sprintf("LogIndex=[%v/%v]", li, app.Index)
 								t.Fatalf("append=%v, rack=%s, file=%s: collector borkened \n==>%s\t%s\t%s\t%s", from, r, f, oks, ents, lts, lis)
 							}
 
@@ -176,16 +178,16 @@ func TestAppendWrite(t *testing.T) {
 					if from == host {
 						u := ppo.GetUpdate(r, f)
 
-						_, ent, lt, li := u.Collected.FetchAllEntries()
-						if !reflect.DeepEqual(appends[to].Entries, ent) {
+						_, fs := u.Collected.FetchAllFragments()
+						if !reflect.DeepEqual(appends[to].Entries, fs[0].Fragment) {
 							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should receive vote", other, from, r, f)
 						}
 
-						if appends[to].LogTerm != lt {
+						if appends[to].LogTerm != fs[0].LogTerm {
 							//
 						}
 
-						if appends[to].Index != li {
+						if appends[to].Index != fs[0].LogIndex {
 							//
 						}
 
@@ -372,7 +374,7 @@ func preparation(storage *mockingIMFStorage, ids []uint64, dropInject bool, usin
 				if from == host {
 					pp.GrantWrite(r, f, storage.OfferWriteGrant(rf2t(r, f)))
 				} else {
-					pp.GrantRead(r, f, storage.OfferReadGrant(rf2t(r, f)), NewEntryFragmentCollector(true))
+					pp.GrantRead(r, f, storage.OfferReadGrant(rf2t(r, f)), collector.NewMultiFragmentsCollector())
 				}
 			}
 		}

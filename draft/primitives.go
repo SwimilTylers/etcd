@@ -1,6 +1,7 @@
 package draft
 
 import (
+	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ type Update struct {
 
 	ZeroDelta bool
 
-	Collected Collector
+	Collected collector.EntryFragmentCollector
 	Commit    uint64
 	VoteMsg   *raftpb.Message
 	Err       error
@@ -32,7 +33,7 @@ func noUpdate(file string) *Update {
 	}
 }
 
-func newUpdate(file string, term uint64, c Collector, commit uint64, vote *raftpb.Message) *Update {
+func newUpdate(file string, term uint64, c collector.EntryFragmentCollector, commit uint64, vote *raftpb.Message) *Update {
 	return &Update{
 		SourceFile: file,
 		Term:       term,
@@ -78,14 +79,14 @@ func (u *updater) RecentIMF() []raftpb.Message {
 type PrimitiveProvider struct {
 	reader    map[string]*updater
 	writer    map[string]IMFWriter
-	collector map[string]Collector
+	collector map[string]collector.EntryFragmentCollector
 }
 
 func NewPrimitiveProvider() *PrimitiveProvider {
 	return &PrimitiveProvider{
 		reader:    make(map[string]*updater),
 		writer:    make(map[string]IMFWriter),
-		collector: make(map[string]Collector),
+		collector: make(map[string]collector.EntryFragmentCollector),
 	}
 }
 
@@ -108,12 +109,12 @@ func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Mess
 func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update) error {
 	signature := filepath.Join(rack, file)
 	if r, ok := pvd.reader[signature]; ok {
-		collector := pvd.collector[signature]
+		ctr := pvd.collector[signature]
 
-		go func(c chan<- *Update, f string, u *updater, cl Collector) {
+		go func(c chan<- *Update, f string, u *updater, cl collector.EntryFragmentCollector) {
 			cl.Refresh()
 			c <- pvd.getUpdate(f, u, cl)
-		}(c, file, r, collector)
+		}(c, file, r, ctr)
 
 		return nil
 	}
@@ -155,12 +156,12 @@ func (pvd *PrimitiveProvider) IMFReader(rack, file string) (IMFReader, int) {
 	return u.reader, u.next
 }
 
-func (pvd *PrimitiveProvider) Collector(rack, file string) Collector {
+func (pvd *PrimitiveProvider) EntryFragmentCollector(rack, file string) collector.EntryFragmentCollector {
 	key := filepath.Join(rack, file)
 	return pvd.collector[key]
 }
 
-func (pvd *PrimitiveProvider) GrantRead(rack, file string, val IMFReader, c Collector) {
+func (pvd *PrimitiveProvider) GrantRead(rack, file string, val IMFReader, c collector.EntryFragmentCollector) {
 	key := filepath.Join(rack, file)
 	pvd.reader[key] = &updater{
 		next:   0,
@@ -186,7 +187,7 @@ func (pvd *PrimitiveProvider) ResetRead(rack, file string, idx int, cRefresh boo
 	return false
 }
 
-func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c Collector) *Update {
+func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c collector.EntryFragmentCollector) *Update {
 	messages := r.RecentIMF()
 
 	if len(messages) == 0 {
@@ -198,7 +199,7 @@ func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c Collector) *U
 			continue
 		}
 
-		c.AddEntries(m.Entries, m.LogTerm, m.Index)
+		c.AddEntriesWithSubmitter(m.Term, m.Entries, m.LogTerm, m.Index)
 	}
 
 	last := messages[len(messages)-1]

@@ -1,7 +1,6 @@
 package draft
 
 import (
-	"errors"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 )
@@ -186,7 +185,8 @@ func (itp *OneToOneInterpreter) interpretApp(m *raftpb.Message) *raftpb.Message 
 	zeroUpdate, vote := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
 
 	if zeroUpdate {
-		return grantApp(m, an)
+		// if there is no other leaders, proceeding
+		return handleAppendEntries(m, an)
 	}
 
 	if vote != nil {
@@ -201,13 +201,13 @@ func (itp *OneToOneInterpreter) interpretApp(m *raftpb.Message) *raftpb.Message 
 			}
 		}
 
-		return grantApp(m, an)
+		return handleAppendEntries(m, an)
 	}
 
 	progress, _ := an.Progress()
 
 	if progress.NoProgress {
-		return grantApp(m, an)
+		return handleAppendEntries(m, an)
 	}
 
 	if progress.Term > m.Term {
@@ -224,7 +224,7 @@ func (itp *OneToOneInterpreter) interpretApp(m *raftpb.Message) *raftpb.Message 
 		}
 	}
 
-	return grantApp(m, an)
+	return handleAppendEntries(m, an)
 }
 
 func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an RackProgressAnalyzer) error {
@@ -238,20 +238,6 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 
 		return err
 	}
-
-	if ok := an.TryOfferEntries(m.Term, m.From, m.Commit, m.LogTerm, m.Index, m.Entries); !ok {
-		itp.lg.Warn("analyzer refuse the local offer",
-			zap.Uint64("term", m.Term),
-			zap.Uint64("commit", m.Commit),
-			zap.Uint64("from", m.From),
-			zap.Uint64("log-term", m.LogTerm),
-			zap.Uint64("log-index", m.Index),
-		)
-		return errors.New("raft kernel is inconsistent to rack progress tracker")
-	}
-
-	// avoid affect to the following steps
-	_, _ = an.Gossip()
 
 	return nil
 }
@@ -278,11 +264,13 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 			)
 		} else if !update.ZeroDelta {
 			zeroDelta = false
-			_ = an.TryOfferCollector(update.Term, itp.f2p[update.SourceFile], 0, update.Collected)
-			if update.VoteMsg != nil {
-				itp.lg.Info("detect another competitor", zap.String("source", update.SourceFile))
-				if vote == nil || vote.Term < update.VoteMsg.Term {
-					vote = update.VoteMsg
+			if an.ConfirmLeadership(update.Term, itp.f2p[update.SourceFile]) {
+				_ = an.TryOfferCollector(update.Term, itp.f2p[update.SourceFile], 0, update.Collected)
+				if update.VoteMsg != nil {
+					itp.lg.Info("detect another competitor", zap.String("source", update.SourceFile))
+					if vote == nil || vote.Term < update.VoteMsg.Term {
+						vote = update.VoteMsg
+					}
 				}
 			}
 		}
@@ -306,27 +294,34 @@ func grantVote(vote *raftpb.Message) *raftpb.Message {
 	}
 }
 
-func grantApp(app *raftpb.Message, an RackProgressAnalyzer) *raftpb.Message {
-	ok, logTerm, logIndex := an.MatchEntryPrefix(app.LogTerm, app.Index)
+func handleAppendEntries(app *raftpb.Message, an RackProgressAnalyzer) *raftpb.Message {
+	if app.Index < an.Commit() {
+		return &raftpb.Message{
+			Type:  raftpb.MsgAppResp,
+			To:    app.From,
+			From:  app.To,
+			Term:  app.Term,
+			Index: an.Commit(),
+		}
+	}
+
+	ok, mLastIndex := an.TryOfferEntries(app.LogTerm, app.Index, app.Commit, app.Entries)
 	if ok {
 		return &raftpb.Message{
-			Type:   raftpb.MsgAppResp,
-			To:     app.From,
-			From:   app.To,
-			Term:   app.Term,
-			Reject: false,
+			Type:  raftpb.MsgAppResp,
+			To:    app.From,
+			From:  app.To,
+			Term:  app.Term,
+			Index: mLastIndex,
 		}
 	} else {
-		// todo: check if legal
-		// reset next[]
 		return &raftpb.Message{
-			Type:    raftpb.MsgAppResp,
-			To:      app.From,
-			From:    app.To,
-			Term:    app.Term,
-			LogTerm: logTerm,
-			Index:   logIndex,
-			Reject:  true,
+			Type:       raftpb.MsgAppResp,
+			To:         app.From,
+			From:       app.To,
+			Term:       app.Term,
+			Reject:     true,
+			RejectHint: an.LastIndex(),
 		}
 	}
 }
