@@ -5,8 +5,8 @@ import (
 	"sort"
 )
 
-//CECEFCxMerge implements a merging between SimplifiedRaftLogCollector and MultiFragmentsCollector.
-// The major collector must be a SimplifiedRaftLogCollector. The first minor collector should be a
+//CECEFCxMerge implements a merging between MimicRaftKernelCollector and MultiFragmentsCollector.
+// The major collector must be a MimicRaftKernelCollector. The first minor collector should be a
 // SingleFragmentCollector as well. The rest should be MultiFragmentsCollector, omitted if not.
 func CECEFCxMerge(commit uint64, major collector.Collector, minor []collector.EntryFragmentCollector, minorCommit []uint64) uint64 {
 	// merge the first minor collector

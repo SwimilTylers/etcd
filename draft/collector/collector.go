@@ -33,19 +33,50 @@ type Collector interface {
 	Refresher
 }
 
+type CECLocation uint8
+
+const (
+	UNDERFLOW CECLocation = 0x0
+	PREV      CECLocation = 0x1
+	WITHIN    CECLocation = 0x2
+	OVERFLOW  CECLocation = 0x4
+	CONFLICT  CECLocation = 0x8
+)
+
 //ConsecutiveEntryCollector is a subtype of Collector. The entry it contains MUST be consecutively increasing.
 type ConsecutiveEntryCollector interface {
 	Collector
+
+	//TryAddEntries works similar to Collector.AddEntries. If failed to add, it will return CECLocation for
+	// further diagnosis:
+	//	1. UNDERFLOW: logIndex is below the prevLogIndex of the entry array
+	//	2. OVERFLOW: logIndex is above index of the last entry
+	//	3. CONFLICT: find the conflict record in the entry array or in the tuple (prevLogIndex, prevLogTerm)
+	TryAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) (bool, CECLocation)
+
+	//MatchIndex compares the given tuple to its own records.
+	//	1. UNDERFLOW: index is below the prevLogIndex of the entry array
+	//	2. PREV: (index, term) matches (prevLogIndex, prevLogTerm)
+	//	3. WITHIN: find the same entry within the entry array
+	//	4. OVERFLOW: index is beyond the maximum index recorded
+	//	5. CONFLICT: find the conflict record in the entry array or in the tuple (prevLogIndex, prevLogTerm)
+	MatchIndex(index, term uint64) CECLocation
+
+	PrevLogTerm() uint64
+	FirstIndex() uint64
+	LastIndex() uint64
+
+	//EntrySize returns the size of entry array
 	EntrySize() int
 	GetLatestTerm() (bool, uint64)
 }
 
-//SimplifiedRaftLogCollector is an implementation of ConsecutiveEntryCollector. It maintains
+//MimicRaftKernelCollector is an implementation of ConsecutiveEntryCollector. It maintains
 // an entry array with consecutive indices. During the process of AddEntries, it might reinitialize
 // the internal array or truncate the internal array. If new entries are not appendable even
 // after those steps, the collector will not take in these entries for the maintenance of
 // consecutive-ness.
-type SimplifiedRaftLogCollector struct {
+type MimicRaftKernelCollector struct {
 	logTerm   uint64
 	logIndex  uint64
 	nextIndex uint64
@@ -57,19 +88,20 @@ type SimplifiedRaftLogCollector struct {
 		term        uint64
 		first, last int
 	}
+
+	initialized bool
 }
 
-func NewSimplifiedRaftLogCollector() *SimplifiedRaftLogCollector {
-	return &SimplifiedRaftLogCollector{copied: false}
+func NewSimplifiedRaftLogCollector() *MimicRaftKernelCollector {
+	return &MimicRaftKernelCollector{copied: false}
 }
 
-func (c *SimplifiedRaftLogCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
-	c.destroyCachedTable()
-	success, _ := c.addEntries(entries, logTerm, logIndex)
-	return success
+func (c *MimicRaftKernelCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
+	ok, _ := c.TryAddEntries(entries, logTerm, logIndex)
+	return ok
 }
 
-func (c *SimplifiedRaftLogCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
+func (c *MimicRaftKernelCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -94,7 +126,7 @@ func (c *SimplifiedRaftLogCollector) FetchEntries(term uint64) (bool, []raftpb.E
 	return true, c.content[left : right+1], last.Term, last.Index
 }
 
-func (c *SimplifiedRaftLogCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
+func (c *MimicRaftKernelCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -112,7 +144,7 @@ func (c *SimplifiedRaftLogCollector) FetchEntriesWithStartIndex(index uint64) (b
 	return true, c.content[idx:], before.Term, before.Index
 }
 
-func (c *SimplifiedRaftLogCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
+func (c *MimicRaftKernelCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
 	if c.IsEmpty() {
 		return false, nil, 0, 0
 	}
@@ -120,18 +152,19 @@ func (c *SimplifiedRaftLogCollector) FetchAllEntries() (bool, []raftpb.Entry, ui
 	return true, c.content, c.logTerm, c.logIndex
 }
 
-func (c *SimplifiedRaftLogCollector) Refresh() {
-	if c.content == nil {
+func (c *MimicRaftKernelCollector) Refresh() {
+	if c.IsEmpty() {
 		return
 	}
 
 	c.content = nil
 	c.copied = false
+	c.initialized = false
 	c.destroyCachedTable()
 }
 
-func (c *SimplifiedRaftLogCollector) Briefing() []*BriefSegment {
-	if c.content == nil {
+func (c *MimicRaftKernelCollector) Briefing() []*BriefSegment {
+	if c.IsEmpty() || c.content == nil {
 		return nil
 	}
 
@@ -166,12 +199,113 @@ func (c *SimplifiedRaftLogCollector) Briefing() []*BriefSegment {
 	return result
 }
 
-func (c *SimplifiedRaftLogCollector) IsEmpty() bool {
-	return c.content == nil
+func (c *MimicRaftKernelCollector) IsEmpty() bool {
+	return !c.initialized
+}
+
+//TryAddEntries of MimicRaftKernelCollector mimics the behavior of raft kernel
+func (c *MimicRaftKernelCollector) TryAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) (bool, CECLocation) {
+	if !c.IsEmpty() {
+		c.init(entries, logTerm, logIndex)
+		return true, PREV
+	}
+
+	/*
+	* o.w. begin mimicking handleAppendEntries
+	 */
+
+	// omit checking committed
+
+	// check the existence of <logIndex, logTerm>
+	loc := c.MatchIndex(logIndex, logTerm)
+	if loc != PREV && loc != WITHIN {
+		return false, loc
+	}
+
+	// find conflicts in entries
+	_, cIdx := c.locateEntryWithLogIndex(logIndex + 1)
+	cLen := len(c.content)
+	eIdx, eLen := 0, len(entries)
+
+	for cIdx < cLen && eIdx < eLen {
+		if entries[eIdx].Term != c.content[cIdx].Term {
+			break
+		}
+		cIdx++
+		eIdx++
+	}
+
+	// append conflict entries
+	if eIdx != eLen {
+		c.destroyCachedTable()
+		// extract the conflict part
+		entries = entries[eIdx:]
+
+		after := entries[0].Index
+		if c.content[cLen-1].Index+1 == after {
+			// direct append
+			c.directAddEntries(entries)
+		} else {
+			// truncate, then append
+			c.resize(cIdx, logTerm, logIndex)
+			c.directAddEntries(entries)
+		}
+	}
+
+	return true, loc
+}
+
+func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) CECLocation {
+	if c.IsEmpty() {
+		panic("not initialized")
+	}
+
+	if c.logIndex > index {
+		// underflow, quit
+		return UNDERFLOW
+	} else if c.logIndex == index {
+		if c.logTerm != term {
+			// inconsistent, quit
+			return CONFLICT
+		} else {
+			return PREV
+		}
+	} else if ok, idx := c.locateEntryWithLogIndex(index); !ok {
+		// overflow, quit
+		return OVERFLOW
+	} else {
+		if c.content[idx].Term != term {
+			// inconsistent, quit
+			return CONFLICT
+		} else {
+			return WITHIN
+		}
+	}
+}
+
+func (c *MimicRaftKernelCollector) PrevLogTerm() uint64 {
+	if c.IsEmpty() {
+		panic("not initialized")
+	}
+	return c.logTerm
+}
+
+func (c *MimicRaftKernelCollector) FirstIndex() uint64 {
+	if c.IsEmpty() {
+		panic("not initialized")
+	}
+	return c.content[0].Index
+}
+
+func (c *MimicRaftKernelCollector) LastIndex() uint64 {
+	if c.IsEmpty() {
+		panic("not initialized")
+	}
+	return c.logIndex + uint64(len(c.content))
 }
 
 //EntrySize returns the size of consecutive entry array
-func (c *SimplifiedRaftLogCollector) EntrySize() int {
+func (c *MimicRaftKernelCollector) EntrySize() int {
 	if c.IsEmpty() {
 		return 0
 	}
@@ -180,7 +314,7 @@ func (c *SimplifiedRaftLogCollector) EntrySize() int {
 }
 
 //GetLatestTerm gets the Term field of the last entry.
-func (c *SimplifiedRaftLogCollector) GetLatestTerm() (bool, uint64) {
+func (c *MimicRaftKernelCollector) GetLatestTerm() (bool, uint64) {
 	if c.IsEmpty() {
 		return false, 0
 	}
@@ -188,15 +322,30 @@ func (c *SimplifiedRaftLogCollector) GetLatestTerm() (bool, uint64) {
 	return true, c.content[len(c.content)-1].Term
 }
 
-func (c *SimplifiedRaftLogCollector) init(entries []raftpb.Entry, logTerm, logIndex uint64) {
+func (c *MimicRaftKernelCollector) init(entries []raftpb.Entry, logTerm, logIndex uint64) {
 	c.copied = false
 	c.content = entries
 	c.logTerm = logTerm
 	c.logIndex = logIndex
 	c.nextIndex = logIndex + uint64(len(entries)) + 1
+	c.initialized = true
 }
 
-func (c *SimplifiedRaftLogCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, bool) {
+func (c *MimicRaftKernelCollector) directAddEntries(entries []raftpb.Entry) {
+	if len(entries) == 0 {
+		return
+	}
+
+	if !c.copied {
+		c.content = append([]raftpb.Entry{}, c.content...)
+		c.copied = true
+	}
+
+	c.content = append(c.content, entries...)
+	c.nextIndex = entries[len(entries)-1].Index
+}
+
+func (c *MimicRaftKernelCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, bool) {
 	if c.content == nil || logIndex <= c.logIndex {
 		c.init(entries, logTerm, logIndex)
 		return true, false
@@ -244,7 +393,7 @@ func (c *SimplifiedRaftLogCollector) addEntries(entries []raftpb.Entry, logTerm,
 	return true, truncated
 }
 
-func (c *SimplifiedRaftLogCollector) rmvEntries(logTerm, logIndex uint64) int {
+func (c *MimicRaftKernelCollector) rmvEntries(logTerm, logIndex uint64) int {
 	if len(c.content) == 0 {
 		return 0
 	}
@@ -290,7 +439,7 @@ func (c *SimplifiedRaftLogCollector) rmvEntries(logTerm, logIndex uint64) int {
 	return len(c.content)
 }
 
-func (c *SimplifiedRaftLogCollector) resize(length int, logTerm, logIndex uint64) int {
+func (c *MimicRaftKernelCollector) resize(length int, logTerm, logIndex uint64) int {
 	if length >= len(c.content) {
 		return len(c.content)
 	}
@@ -301,10 +450,8 @@ func (c *SimplifiedRaftLogCollector) resize(length int, logTerm, logIndex uint64
 	}
 
 	if !c.copied {
-		content := make([]raftpb.Entry, length, 2*length)
-		copy(content, c.content[:length])
+		c.content = append([]raftpb.Entry{}, c.content[:length]...)
 		c.copied = true
-		c.content = content
 	} else {
 		c.content = c.content[:length]
 	}
@@ -314,12 +461,12 @@ func (c *SimplifiedRaftLogCollector) resize(length int, logTerm, logIndex uint64
 	return length
 }
 
-func (c *SimplifiedRaftLogCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
+func (c *MimicRaftKernelCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
 	rel := int(logIndex - c.logIndex - 1)
 	return rel >= 0 && rel < len(c.content), rel
 }
 
-func (c *SimplifiedRaftLogCollector) locateEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *MimicRaftKernelCollector) locateEntryWithTerm(term uint64, from, to int) (bool, int) {
 	if ok, l, _ := c.locateCachedTableWithTerm(term, from, to); ok {
 		return true, l
 	}
@@ -342,7 +489,7 @@ func (c *SimplifiedRaftLogCollector) locateEntryWithTerm(term uint64, from, to i
 	return false, start
 }
 
-func (c *SimplifiedRaftLogCollector) locateFirstEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *MimicRaftKernelCollector) locateFirstEntryWithTerm(term uint64, from, to int) (bool, int) {
 	if ok, l, _ := c.locateCachedTableWithTerm(term, from, to); ok {
 		return true, l
 	}
@@ -368,7 +515,7 @@ func (c *SimplifiedRaftLogCollector) locateFirstEntryWithTerm(term uint64, from,
 	return false, start
 }
 
-func (c *SimplifiedRaftLogCollector) locateLastEntryWithTerm(term uint64, from, to int) (bool, int) {
+func (c *MimicRaftKernelCollector) locateLastEntryWithTerm(term uint64, from, to int) (bool, int) {
 	if ok, _, r := c.locateCachedTableWithTerm(term, from, to); ok {
 		return true, r
 	}
@@ -394,14 +541,14 @@ func (c *SimplifiedRaftLogCollector) locateLastEntryWithTerm(term uint64, from, 
 	return false, start
 }
 
-func (c *SimplifiedRaftLogCollector) destroyCachedTable() {
+func (c *MimicRaftKernelCollector) destroyCachedTable() {
 	if c.cachedTable == nil {
 		return
 	}
 	c.cachedTable = c.cachedTable[:0]
 }
 
-func (c *SimplifiedRaftLogCollector) locateCachedTableWithTerm(term uint64, from, to int) (bool, int, int) {
+func (c *MimicRaftKernelCollector) locateCachedTableWithTerm(term uint64, from, to int) (bool, int, int) {
 	if len(c.cachedTable) == 0 {
 		return false, 0, 0
 	}
@@ -440,7 +587,7 @@ func (c *SimplifiedRaftLogCollector) locateCachedTableWithTerm(term uint64, from
 	return false, 0, 0
 }
 
-func (c *SimplifiedRaftLogCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
+func (c *MimicRaftKernelCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
 	if len(c.content) == 0 {
 		return true
 	}
@@ -716,10 +863,10 @@ func (c *FragmentaryEntryCollector) regularize() {
 
 func (c *FragmentaryEntryCollector) addSubCollectorAndMoveToTail() *subCollector {
 	if c.head == nil {
-		c.head = &subCollector{ConsecutiveEntryCollector: &SimplifiedRaftLogCollector{}}
+		c.head = &subCollector{ConsecutiveEntryCollector: &MimicRaftKernelCollector{}}
 		c.tail = c.head
 	} else {
-		c.tail.next = &subCollector{ConsecutiveEntryCollector: &SimplifiedRaftLogCollector{}, prev: c.tail}
+		c.tail.next = &subCollector{ConsecutiveEntryCollector: &MimicRaftKernelCollector{}, prev: c.tail}
 		c.tail = c.tail.next
 	}
 
