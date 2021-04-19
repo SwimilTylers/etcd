@@ -63,7 +63,7 @@ func NewBriefSegmentCollector() *BriefSegmentCollector {
 	return &BriefSegmentCollector{}
 }
 
-func (c *BriefSegmentCollector) IsEmpty() bool {
+func (c *BriefSegmentCollector) IsInitialized() bool {
 	return c.next == nil
 }
 

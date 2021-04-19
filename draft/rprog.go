@@ -72,8 +72,8 @@ type CollectorAnalyzer struct {
 
 func NewDefaultCollectorAnalyzer() *CollectorAnalyzer {
 	return NewCollectorAnalyzer(
-		collector.NewSimplifiedRaftLogCollector(),
-		collector.NewSingleFragmentCollector(collector.NewSimplifiedRaftLogCollector()),
+		collector.NewMimicRaftKernelCollector(),
+		collector.NewSingleFragmentCollector(collector.NewMimicRaftKernelCollector()),
 		CECEFCxMerge,
 		nil,
 	)
@@ -167,7 +167,7 @@ func (ca *CollectorAnalyzer) ConfirmLeadership(term, tHolder uint64) bool {
 
 func (ca *CollectorAnalyzer) LastIndex() uint64 {
 	ca.upgrade()
-	if ca.compacted.IsEmpty() {
+	if ca.compacted.IsInitialized() {
 		return 0
 	}
 

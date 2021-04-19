@@ -5,8 +5,8 @@ import (
 )
 
 type Refresher interface {
-	//IsEmpty checks if the collector is empty.
-	IsEmpty() bool
+	//IsInitialized checks if the collector is initialized.
+	IsInitialized() bool
 
 	//Refresh removes all internal status.
 	Refresh()
@@ -66,6 +66,10 @@ type ConsecutiveEntryCollector interface {
 	FirstIndex() uint64
 	LastIndex() uint64
 
+	//IsEmpty checks if the entry array is empty. To be mentioned, an empty array might have a prefix of
+	// (prevLogIndex, prevLogTerm).
+	IsEmpty() bool
+
 	//EntrySize returns the size of entry array
 	EntrySize() int
 	GetLatestTerm() (bool, uint64)
@@ -92,8 +96,8 @@ type MimicRaftKernelCollector struct {
 	initialized bool
 }
 
-func NewSimplifiedRaftLogCollector() *MimicRaftKernelCollector {
-	return &MimicRaftKernelCollector{copied: false}
+func NewMimicRaftKernelCollector() *MimicRaftKernelCollector {
+	return &MimicRaftKernelCollector{copied: false, initialized: false}
 }
 
 func (c *MimicRaftKernelCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -102,7 +106,7 @@ func (c *MimicRaftKernelCollector) AddEntries(entries []raftpb.Entry, logTerm ui
 }
 
 func (c *MimicRaftKernelCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil, 0, 0
 	}
 
@@ -127,7 +131,7 @@ func (c *MimicRaftKernelCollector) FetchEntries(term uint64) (bool, []raftpb.Ent
 }
 
 func (c *MimicRaftKernelCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil, 0, 0
 	}
 
@@ -145,7 +149,7 @@ func (c *MimicRaftKernelCollector) FetchEntriesWithStartIndex(index uint64) (boo
 }
 
 func (c *MimicRaftKernelCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil, 0, 0
 	}
 
@@ -153,7 +157,7 @@ func (c *MimicRaftKernelCollector) FetchAllEntries() (bool, []raftpb.Entry, uint
 }
 
 func (c *MimicRaftKernelCollector) Refresh() {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return
 	}
 
@@ -164,7 +168,7 @@ func (c *MimicRaftKernelCollector) Refresh() {
 }
 
 func (c *MimicRaftKernelCollector) Briefing() []*BriefSegment {
-	if c.IsEmpty() || c.content == nil {
+	if c.IsInitialized() || c.content == nil {
 		return nil
 	}
 
@@ -199,13 +203,13 @@ func (c *MimicRaftKernelCollector) Briefing() []*BriefSegment {
 	return result
 }
 
-func (c *MimicRaftKernelCollector) IsEmpty() bool {
+func (c *MimicRaftKernelCollector) IsInitialized() bool {
 	return !c.initialized
 }
 
 //TryAddEntries of MimicRaftKernelCollector mimics the behavior of raft kernel
 func (c *MimicRaftKernelCollector) TryAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) (bool, CECLocation) {
-	if !c.IsEmpty() {
+	if !c.IsInitialized() {
 		c.init(entries, logTerm, logIndex)
 		return true, PREV
 	}
@@ -256,7 +260,7 @@ func (c *MimicRaftKernelCollector) TryAddEntries(entries []raftpb.Entry, logTerm
 }
 
 func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) CECLocation {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		panic("not initialized")
 	}
 
@@ -284,29 +288,32 @@ func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) CECLocation {
 }
 
 func (c *MimicRaftKernelCollector) PrevLogTerm() uint64 {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		panic("not initialized")
 	}
 	return c.logTerm
 }
 
 func (c *MimicRaftKernelCollector) FirstIndex() uint64 {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		panic("not initialized")
 	}
 	return c.content[0].Index
 }
 
 func (c *MimicRaftKernelCollector) LastIndex() uint64 {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		panic("not initialized")
 	}
 	return c.logIndex + uint64(len(c.content))
 }
 
-//EntrySize returns the size of consecutive entry array
+func (c *MimicRaftKernelCollector) IsEmpty() bool {
+	return c.EntrySize() == 0
+}
+
 func (c *MimicRaftKernelCollector) EntrySize() int {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return 0
 	}
 
@@ -315,7 +322,7 @@ func (c *MimicRaftKernelCollector) EntrySize() int {
 
 //GetLatestTerm gets the Term field of the last entry.
 func (c *MimicRaftKernelCollector) GetLatestTerm() (bool, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, 0
 	}
 
@@ -622,10 +629,20 @@ type FragmentaryEntryCollector struct {
 
 	regularized   bool
 	defaultRegOpt bool
+
+	subCECFactory func() ConsecutiveEntryCollector
 }
 
-func NewFragmentaryEntryCollector(defaultRegOpt bool) *FragmentaryEntryCollector {
-	return &FragmentaryEntryCollector{defaultRegOpt: defaultRegOpt, regularized: defaultRegOpt}
+func (c *FragmentaryEntryCollector) SubCECFactory() func() ConsecutiveEntryCollector {
+	return c.subCECFactory
+}
+
+func (c *FragmentaryEntryCollector) SetSubCECFactory(subCECFactory func() ConsecutiveEntryCollector) {
+	c.subCECFactory = subCECFactory
+}
+
+func NewFragmentaryEntryCollector(defaultRegOpt bool, subCECFactory func() ConsecutiveEntryCollector) *FragmentaryEntryCollector {
+	return &FragmentaryEntryCollector{defaultRegOpt: defaultRegOpt, regularized: defaultRegOpt, subCECFactory: subCECFactory}
 }
 
 func (c *FragmentaryEntryCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -639,7 +656,7 @@ func (c *FragmentaryEntryCollector) AddEntries(entries []raftpb.Entry, logTerm u
 }
 
 func (c *FragmentaryEntryCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil, 0, 0
 	}
 
@@ -653,7 +670,7 @@ func (c *FragmentaryEntryCollector) FetchEntries(term uint64) (bool, []raftpb.En
 }
 
 func (c *FragmentaryEntryCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil, 0, 0
 	}
 
@@ -665,7 +682,7 @@ func (c *FragmentaryEntryCollector) FetchEntriesWithStartIndex(index uint64) (bo
 }
 
 func (c *FragmentaryEntryCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil, 0, 0
 	}
 
@@ -705,8 +722,8 @@ func (c *FragmentaryEntryCollector) Briefing() []*BriefSegment {
 	return c.briefing()
 }
 
-func (c *FragmentaryEntryCollector) IsEmpty() bool {
-	return c.head == nil || c.head.IsEmpty()
+func (c *FragmentaryEntryCollector) IsInitialized() bool {
+	return c.head == nil || c.head.IsInitialized()
 }
 
 func (c *FragmentaryEntryCollector) DefaultRegOpt() bool {
@@ -832,7 +849,7 @@ func (c *FragmentaryEntryCollector) regularize() {
 			// clear out buffered brief
 			needle.brief = nil
 
-			if needle.IsEmpty() {
+			if needle.IsInitialized() {
 				needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
 				continue
 			}
@@ -863,10 +880,10 @@ func (c *FragmentaryEntryCollector) regularize() {
 
 func (c *FragmentaryEntryCollector) addSubCollectorAndMoveToTail() *subCollector {
 	if c.head == nil {
-		c.head = &subCollector{ConsecutiveEntryCollector: &MimicRaftKernelCollector{}}
+		c.head = &subCollector{ConsecutiveEntryCollector: c.subCECFactory()}
 		c.tail = c.head
 	} else {
-		c.tail.next = &subCollector{ConsecutiveEntryCollector: &MimicRaftKernelCollector{}, prev: c.tail}
+		c.tail.next = &subCollector{ConsecutiveEntryCollector: c.subCECFactory(), prev: c.tail}
 		c.tail = c.tail.next
 	}
 

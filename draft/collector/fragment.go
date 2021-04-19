@@ -53,7 +53,7 @@ func (c *SingleFragmentCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 }
 
 func (c *SingleFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil
 	}
 
@@ -72,7 +72,7 @@ func (c *SingleFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bo
 }
 
 func (c *SingleFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil
 	}
 
@@ -90,8 +90,8 @@ func (c *SingleFragmentCollector) Briefing() []*BriefSegment {
 	return c.cec.Briefing()
 }
 
-func (c *SingleFragmentCollector) IsEmpty() bool {
-	return c.cec.IsEmpty()
+func (c *SingleFragmentCollector) IsInitialized() bool {
+	return c.cec.IsInitialized()
 }
 
 func (c *SingleFragmentCollector) Refresh() {
@@ -106,7 +106,7 @@ type MultiFragmentsCollector struct {
 }
 
 func NewMultiFragmentsCollector() *MultiFragmentsCollector {
-	return &MultiFragmentsCollector{NewFragmentaryEntryCollector(true), 0}
+	return &MultiFragmentsCollector{NewFragmentaryEntryCollector(true, func() ConsecutiveEntryCollector { return NewMimicRaftKernelCollector() }), 0}
 }
 
 func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -123,7 +123,7 @@ func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 //FetchFragmentsWithStartIndex fetches fragments with index >= startIndex. If part of some Fragment
 // is not satisfied, truncate it. Return false if no such a Fragment.
 func (c *MultiFragmentsCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil
 	}
 
@@ -138,7 +138,7 @@ func (c *MultiFragmentsCollector) FetchFragmentsWithStartIndex(index uint64) (bo
 
 //FetchAllFragments fetches all fragments from the list. Return false if it is empty.
 func (c *MultiFragmentsCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsEmpty() {
+	if c.IsInitialized() {
 		return false, nil
 	}
 
@@ -149,8 +149,8 @@ func (c *MultiFragmentsCollector) Briefing() []*BriefSegment {
 	return c.fec.Briefing()
 }
 
-func (c *MultiFragmentsCollector) IsEmpty() bool {
-	return c.fec.IsEmpty()
+func (c *MultiFragmentsCollector) IsInitialized() bool {
+	return c.fec.IsInitialized()
 }
 
 func (c *MultiFragmentsCollector) Refresh() {
