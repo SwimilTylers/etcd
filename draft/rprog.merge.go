@@ -67,7 +67,7 @@ func MergeEntryFragments(commit uint64, in []collector.EntryFragmentCollector, o
 
 	for _, f := range fragments {
 		if f.CTerm >= nextTerm {
-			out.AddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			out.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
 			nextTerm++
 		}
 	}

@@ -1,7 +1,6 @@
 package collector
 
 import (
-	"fmt"
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
@@ -53,108 +52,187 @@ func ExtractBriefFromEntries(prevLogTerm uint64, ent []raftpb.Entry) []*BriefSeg
 	return res
 }
 
-type BriefSegmentCollector struct {
-	b      []*BriefSegment
-	next   *BriefSegment
-	commit uint64
+type BriefSegmentCollector interface {
+	//AddEntriesToBrief collects entries and resolve potential conflict. This might cause
+	// the modification of internal structure. Return false if failed to attach new entries.
+	AddEntriesToBrief(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool
+
+	ResizeBriefToIndex(index uint64) (bool, Location)
+
+	Locator
+	Briefer
+	Refresher
 }
 
-func NewBriefSegmentCollector() *BriefSegmentCollector {
-	return &BriefSegmentCollector{}
+type MimicRaftKernelBriefCollector struct {
+	b    []*BriefSegment
+	next *BriefSegment
+
+	logTerm  uint64
+	logIndex uint64
+
+	initialized bool
 }
 
-func (c *BriefSegmentCollector) IsInitialized() bool {
-	return c.next == nil
+func NewMimicRaftKernelBriefCollector() *MimicRaftKernelBriefCollector {
+	return &MimicRaftKernelBriefCollector{}
 }
 
-func (c *BriefSegmentCollector) Refresh() {
-	c.b = nil
-	c.next = nil
-	c.commit = 0
+func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
+	if c.IsNotInitialized() {
+		c.init(entries, logTerm, logIndex)
+		return true
+	}
+
+	ok, _ := c.mimic(entries, logTerm, logIndex)
+	return ok
 }
 
-func (c *BriefSegmentCollector) Briefing() []*BriefSegment {
-	return c.b
+func (c *MimicRaftKernelBriefCollector) ResizeBriefToIndex(index uint64) (bool, Location) {
+	if c.IsNotInitialized() || c.IsEmpty() {
+		panic("illegal operation")
+	}
+
+	first, last := c.b[0].FirstIndex, c.b[len(c.b)-1].LastIndex
+
+	switch {
+	case index < first-1:
+		return false, UNDERFLOW
+	case index == first-1:
+		c.b = nil
+		c.next = nil
+		return true, PREV
+	case index > last:
+		return false, OVERFLOW
+	default:
+		idx := c.locateIndex(index, 0, len(c.b))
+		c.b = c.b[:idx+1]
+		c.next = c.b[idx]
+		c.next.LastIndex = index
+		return true, WITHIN
+	}
 }
 
-func (c *BriefSegmentCollector) PrevLogTerm() uint64 {
-	return c.b[0].PrevLogTerm
+func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location {
+	l, _ := c.matchIndex(index, term)
+	return l
 }
 
-func (c *BriefSegmentCollector) FirstIndex() uint64 {
-	return c.b[0].FirstIndex
+func (c *MimicRaftKernelBriefCollector) PrevLogTerm() uint64 {
+	if c.IsNotInitialized() {
+		panic("not initialized")
+	}
+	return c.logTerm
 }
 
-func (c *BriefSegmentCollector) LastIndex() uint64 {
+func (c *MimicRaftKernelBriefCollector) FirstIndex() uint64 {
+	if c.IsNotInitialized() || c.IsEmpty() {
+		panic("illegal operation")
+	}
+	return c.logIndex + 1
+}
+
+func (c *MimicRaftKernelBriefCollector) LastIndex() uint64 {
+	if c.IsNotInitialized() || c.IsEmpty() {
+		panic("illegal operation")
+	}
 	return c.next.LastIndex
 }
 
-func (c *BriefSegmentCollector) SetCommit(commit uint64) {
-	c.commit = commit
+func (c *MimicRaftKernelBriefCollector) IsEmpty() bool {
+	return c.next == nil
 }
 
-func (c *BriefSegmentCollector) AbsorbEntries(logTerm, logIndex uint64, ent []raftpb.Entry) (bool, uint64) {
-	l := len(c.b)
-	if l == 0 {
-		return false, 0
+func (c *MimicRaftKernelBriefCollector) IsNotInitialized() bool {
+	return !c.initialized
+}
+
+func (c *MimicRaftKernelBriefCollector) Refresh() {
+	c.b = nil
+	c.next = nil
+	c.initialized = false
+}
+
+func (c *MimicRaftKernelBriefCollector) Briefing() []*BriefSegment {
+	if c.IsNotInitialized() || c.IsEmpty() {
+		return nil
 	}
 
-	idx := c.locateTerm(logTerm, 0, l)
-	if idx == l {
-		return false, 0
+	return c.b
+}
+
+func (c *MimicRaftKernelBriefCollector) init(ent []raftpb.Entry, logTerm, logIndex uint64) {
+	c.initialized = true
+	c.logTerm = logTerm
+	c.logIndex = logIndex
+
+	c.b = ExtractBriefFromEntries(logTerm, ent)
+	if len(c.b) != 0 {
+		c.next = c.b[len(c.b)-1]
+	}
+}
+
+func (c *MimicRaftKernelBriefCollector) mimic(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, Location) {
+	// omit checking committed
+
+	// check the existence of <logIndex, logTerm>
+	loc := c.MatchIndex(logIndex, logTerm)
+	if loc != PREV && loc != WITHIN {
+		return false, loc
 	}
 
-	brief := c.b[idx]
-	if brief.Hit(logTerm, logIndex) || brief.HitPrev(logTerm, logIndex) {
-		lastNewIndex := logIndex + uint64(len(ent))
-		ci := c.findConflictIndex(ent, idx)
-		switch {
-		case ci == 0:
-		case ci < c.commit:
-			panic(fmt.Errorf("entry %d conflict with committed entry [committed(%d)]", ci, c.commit))
-		default:
-			offset := logIndex + 1
-			if len(ent) > 0 {
-				if ci == offset {
-					c.absorbBriefs(ExtractBriefFromEntries(logTerm, ent))
+	// find conflicts in entries
+	eLen := len(entries)
+	cLen := len(c.b)
+
+	if eLen != 0 {
+		if l, cIdx := c.matchIndex(entries[0].Index, entries[0].Term); l == WITHIN {
+			brief := c.b[cIdx]
+			eIdx := 0
+			for eIdx < eLen && cIdx < cLen {
+				ent := entries[eIdx]
+				if !brief.Hit(ent.Term, ent.Index) {
+					cIdx++
+					if cIdx == cLen {
+						break
+					}
+					brief = c.b[cIdx]
+					if !brief.Hit(ent.Term, ent.Index) {
+						break
+					}
+				}
+				eIdx++
+			}
+
+			// append conflict entries
+			if eIdx != eLen {
+				entries = entries[eIdx:]
+				var prevLogTerm uint64
+				if eIdx == 0 {
+					prevLogTerm = logTerm
 				} else {
-					c.absorbBriefs(ExtractBriefFromEntries(ent[ci-offset-1].Term, ent[ci-offset:]))
+					prevLogTerm = entries[eIdx-1].Term
+				}
+
+				after := entries[0].Index
+				if c.next.LastIndex+1 == after {
+					// direct append
+					c.absorbBriefs(ExtractBriefFromEntries(prevLogTerm, entries))
+				} else {
+					// truncate then append
+					c.b = c.b[:cIdx+1]
+					c.next = brief
+					brief.LastIndex = after - 1
+					c.absorbBriefs(ExtractBriefFromEntries(prevLogTerm, entries))
 				}
 			}
 		}
-
-		return true, lastNewIndex
 	}
 
-	return false, 0
+	return true, loc
 }
 
-func (c *BriefSegmentCollector) findConflictIndex(ent []raftpb.Entry, cStart int) uint64 {
-	eIdx, eLen := 0, len(ent)
-	cIdx, cLen := cStart, len(c.b)
-
-	cc := c.b[cIdx]
-
-	for eIdx < eLen && cIdx < cLen {
-		e := ent[eIdx]
-
-		if !cc.Hit(e.Term, e.Index) {
-			cIdx++
-			if cIdx == cLen {
-				return e.Index
-			}
-			if cc = c.b[cIdx]; !cc.Hit(e.Term, e.Index) {
-				return e.Index
-			}
-		}
-
-		eIdx++
-	}
-
-	return 0
-}
-
-func (c *BriefSegmentCollector) locateTerm(term uint64, from, to int) int {
+func (c *MimicRaftKernelBriefCollector) locateTerm(term uint64, from, to int) int {
 	start := from
 	end := to
 
@@ -174,7 +252,27 @@ func (c *BriefSegmentCollector) locateTerm(term uint64, from, to int) int {
 	return start
 }
 
-func (c *BriefSegmentCollector) absorbBriefs(b []*BriefSegment) {
+func (c *MimicRaftKernelBriefCollector) locateIndex(index uint64, from, to int) int {
+	start := from
+	end := to
+
+	for start < end {
+		mid := (start + end) / 2
+		first, last := c.b[mid].FirstIndex, c.b[mid].LastIndex
+
+		if last < index {
+			start = mid + 1
+		} else if index < first {
+			end = mid
+		} else {
+			return mid
+		}
+	}
+
+	return start
+}
+
+func (c *MimicRaftKernelBriefCollector) absorbBriefs(b []*BriefSegment) {
 	if len(b) == 0 {
 		return
 	}
@@ -196,5 +294,29 @@ func (c *BriefSegmentCollector) absorbBriefs(b []*BriefSegment) {
 	case succ.PrevLogTerm == c.next.Term:
 		c.b = append(c.b, b...)
 		c.next = b[len(b)-1]
+	}
+}
+
+func (c *MimicRaftKernelBriefCollector) matchIndex(index, term uint64) (Location, int) {
+	first, last := c.b[0].FirstIndex, c.b[len(c.b)-1].LastIndex
+
+	switch {
+	case index < first-1:
+		return UNDERFLOW, -1
+	case index == first-1:
+		if c.b[0].HitPrev(index, term) {
+			return PREV, -1
+		} else {
+			return CONFLICT, -1
+		}
+	case index > last:
+		return OVERFLOW, -1
+	default:
+		idx := c.locateTerm(term, 0, len(c.b))
+		if c.b[idx].Hit(term, index) {
+			return WITHIN, idx
+		} else {
+			return CONFLICT, -1
+		}
 	}
 }

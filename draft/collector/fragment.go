@@ -44,7 +44,7 @@ func (c *SingleFragmentCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 		return false
 	}
 
-	if !c.cec.AddEntries(entries, logTerm, logIndex) {
+	if ok, _ := c.cec.TryAddEntries(entries, logTerm, logIndex); !ok {
 		return false
 	}
 
@@ -53,7 +53,7 @@ func (c *SingleFragmentCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 }
 
 func (c *SingleFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsInitialized() {
+	if c.IsNotInitialized() {
 		return false, nil
 	}
 
@@ -72,7 +72,7 @@ func (c *SingleFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bo
 }
 
 func (c *SingleFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsInitialized() {
+	if c.IsNotInitialized() {
 		return false, nil
 	}
 
@@ -90,8 +90,8 @@ func (c *SingleFragmentCollector) Briefing() []*BriefSegment {
 	return c.cec.Briefing()
 }
 
-func (c *SingleFragmentCollector) IsInitialized() bool {
-	return c.cec.IsInitialized()
+func (c *SingleFragmentCollector) IsNotInitialized() bool {
+	return c.cec.IsNotInitialized()
 }
 
 func (c *SingleFragmentCollector) Refresh() {
@@ -101,12 +101,12 @@ func (c *SingleFragmentCollector) Refresh() {
 
 //MultiFragmentsCollector is an implementation of EntryFragmentCollector.
 type MultiFragmentsCollector struct {
-	fec        *FragmentaryEntryCollector
+	fec        *LinkedListCollector
 	gGuarantor uint64
 }
 
 func NewMultiFragmentsCollector() *MultiFragmentsCollector {
-	return &MultiFragmentsCollector{NewFragmentaryEntryCollector(true, func() ConsecutiveEntryCollector { return NewMimicRaftKernelCollector() }), 0}
+	return &MultiFragmentsCollector{NewLinkedListCollector(true, func() Collector { return NewMimicRaftKernelCollector() }), 0}
 }
 
 func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -115,7 +115,7 @@ func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 	}
 
 	c.fec.AddEntries(entries, logTerm, logIndex)
-	c.fec.tail.guarantor = sTerm
+	c.fec.tail.info = sTerm
 
 	return true
 }
@@ -123,7 +123,7 @@ func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 //FetchFragmentsWithStartIndex fetches fragments with index >= startIndex. If part of some Fragment
 // is not satisfied, truncate it. Return false if no such a Fragment.
 func (c *MultiFragmentsCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsInitialized() {
+	if c.IsNotInitialized() {
 		return false, nil
 	}
 
@@ -138,7 +138,7 @@ func (c *MultiFragmentsCollector) FetchFragmentsWithStartIndex(index uint64) (bo
 
 //FetchAllFragments fetches all fragments from the list. Return false if it is empty.
 func (c *MultiFragmentsCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsInitialized() {
+	if c.IsNotInitialized() {
 		return false, nil
 	}
 
@@ -149,8 +149,8 @@ func (c *MultiFragmentsCollector) Briefing() []*BriefSegment {
 	return c.fec.Briefing()
 }
 
-func (c *MultiFragmentsCollector) IsInitialized() bool {
-	return c.fec.IsInitialized()
+func (c *MultiFragmentsCollector) IsNotInitialized() bool {
+	return c.fec.IsNotInitialized()
 }
 
 func (c *MultiFragmentsCollector) Refresh() {
@@ -171,7 +171,7 @@ func (c *MultiFragmentsCollector) fetchFragments(index uint64) []*EntryFragment 
 					LogTerm:  logTerm,
 					LogIndex: logIndex,
 					Fragment: ent,
-					CTerm:    needle.guarantor,
+					CTerm:    needle.info,
 				})
 			}
 		} else {
@@ -180,7 +180,7 @@ func (c *MultiFragmentsCollector) fetchFragments(index uint64) []*EntryFragment 
 				LogTerm:  logTerm,
 				LogIndex: logIndex,
 				Fragment: ent,
-				CTerm:    needle.guarantor,
+				CTerm:    needle.info,
 			})
 		}
 		needle = needle.next
