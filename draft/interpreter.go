@@ -1,6 +1,7 @@
 package draft
 
 import (
+	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 )
@@ -25,7 +26,7 @@ type OneToOneInterpreter struct {
 	f2p   map[string]uint64
 
 	drp Primitives
-	an  map[string]RackProgressAnalyzer
+	an  map[string]*MimicRaftKernelAnalyzer
 }
 
 func (itp *OneToOneInterpreter) IsSupported(m *raftpb.Message) bool {
@@ -60,7 +61,7 @@ func (itp *OneToOneInterpreter) drSync() *raftpb.Message {
 		return nil
 	}
 
-	progress, _ := an.Progress()
+	progress := an.Progress()
 
 	if progress.NoProgress {
 		return nil
@@ -125,7 +126,7 @@ func (itp *OneToOneInterpreter) interpretVote(m *raftpb.Message) *raftpb.Message
 		}
 	}
 
-	progress, _ := an.Progress()
+	progress := an.Progress()
 
 	if progress.NoProgress {
 		return grantVote(m)
@@ -185,26 +186,28 @@ func (itp *OneToOneInterpreter) interpretApp(m *raftpb.Message) *raftpb.Message 
 	zeroUpdate, vote := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
 
 	if zeroUpdate {
-		// if there is no other leaders, proceeding
+		// no remote update receive, omit checking remote offer
+
+		// add local offer to analyzer
+		an.AnalyzeAndRemoveOffers()
+
+		// safe to compact
+		an.Compact()
+
+		// ready for response
 		return handleAppendEntries(m, an)
 	}
 
 	if vote != nil {
 		if vote.Term > m.Term {
-			// todo: check if legal
-			return &raftpb.Message{
-				Type:   raftpb.MsgAppResp,
-				To:     m.From,
-				From:   vote.From,
-				Term:   vote.Term,
-				Reject: true,
-			}
+			an.OfferRemoteVote(vote.Term, vote.From)
+			// our leadership is overthrown
 		}
 
 		return handleAppendEntries(m, an)
 	}
 
-	progress, _ := an.Progress()
+	progress := an.Progress()
 
 	if progress.NoProgress {
 		return handleAppendEntries(m, an)
@@ -227,7 +230,7 @@ func (itp *OneToOneInterpreter) interpretApp(m *raftpb.Message) *raftpb.Message 
 	return handleAppendEntries(m, an)
 }
 
-func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an RackProgressAnalyzer) error {
+func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an *MimicRaftKernelAnalyzer) error {
 	if err := itp.drp.Write(rack, targetFile, m); err != nil {
 		itp.lg.Warn("error occurs when perform draft primitives",
 			zap.String("op", "write"),
@@ -239,10 +242,17 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 		return err
 	}
 
+	switch m.Type {
+	case raftpb.MsgVote:
+		an.OfferLocalVote(m.Term, m.From)
+	case raftpb.MsgApp, raftpb.MsgHeartbeat:
+		an.OfferLocalEntries(m.Term, m.Commit, m.LogTerm, m.Entries)
+	}
+
 	return nil
 }
 
-func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an RackProgressAnalyzer) (bool, *raftpb.Message) {
+func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, *raftpb.Message) {
 	var count = len(itp.files) - 1
 	var c = make(chan *Update, count)
 	for _, file := range itp.files {
@@ -264,13 +274,20 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 			)
 		} else if !update.ZeroDelta {
 			zeroDelta = false
-			if an.ConfirmLeadership(update.Term, itp.f2p[update.SourceFile]) {
-				_ = an.TryOfferCollector(update.Term, itp.f2p[update.SourceFile], 0, update.Collected)
-				if update.VoteMsg != nil {
-					itp.lg.Info("detect another competitor", zap.String("source", update.SourceFile))
-					if vote == nil || vote.Term < update.VoteMsg.Term {
-						vote = update.VoteMsg
-					}
+			itp.lg.Info("receive an update from other file",
+				zap.String("rack", rack),
+				zap.String("file", update.SourceFile),
+				zap.Uint64("term", update.Term),
+				zap.Uint64("committed", update.Commit),
+				zap.Bool("has-append", !update.Collected.IsNotInitialized()),
+				zap.Bool("has-vote", update.VoteMsg != nil),
+			)
+
+			an.OfferRemoteEntries(update.Term, update.Commit, update.Collected)
+
+			if update.VoteMsg != nil {
+				if vote == nil || vote.Term < update.VoteMsg.Term {
+					vote = update.VoteMsg
 				}
 			}
 		}
@@ -294,34 +311,51 @@ func grantVote(vote *raftpb.Message) *raftpb.Message {
 	}
 }
 
-func handleAppendEntries(app *raftpb.Message, an RackProgressAnalyzer) *raftpb.Message {
-	if app.Index < an.Commit() {
-		return &raftpb.Message{
-			Type:  raftpb.MsgAppResp,
-			To:    app.From,
-			From:  app.To,
-			Term:  app.Term,
-			Index: an.Commit(),
-		}
+func handleAppendEntries(app *raftpb.Message, an *MimicRaftKernelAnalyzer) *raftpb.Message {
+	committed := an.Committed()
+
+	if app.Index < committed {
+		return newAppRespAccept(app.From, app.To, an.Term(), committed)
 	}
 
-	ok, mLastIndex := an.TryOfferEntries(app.LogTerm, app.Index, app.Commit, app.Entries)
-	if ok {
-		return &raftpb.Message{
-			Type:  raftpb.MsgAppResp,
-			To:    app.From,
-			From:  app.To,
-			Term:  app.Term,
-			Index: mLastIndex,
-		}
-	} else {
-		return &raftpb.Message{
-			Type:       raftpb.MsgAppResp,
-			To:         app.From,
-			From:       app.To,
-			Term:       app.Term,
-			Reject:     true,
-			RejectHint: an.LastIndex(),
-		}
+	lastNewIndex := app.Index + uint64(len(app.Entries))
+
+	switch an.MatchIndex(app.Index, app.LogTerm) {
+	case collector.UNDERFLOW:
+		panic("underflow occurs when making response")
+	case collector.PREV, collector.WITHIN:
+		return newAppRespAccept(app.From, app.To, an.Term(), lastNewIndex)
+	default:
+		return newAppRespReject(app.From, app.To, an.Term(), app.Index, lastNewIndex)
+	}
+}
+
+func newVoteRespAccept(voteSender, voteResponder, term, index uint64) *raftpb.Message {
+	return nil
+}
+
+func newVoteRespReject(voteSender, voteResponder, term, index, rejectHint uint64) *raftpb.Message {
+	return nil
+}
+
+func newAppRespAccept(appSender, appResponder, term, index uint64) *raftpb.Message {
+	return &raftpb.Message{
+		Type:  raftpb.MsgAppResp,
+		To:    appSender,
+		From:  appResponder,
+		Term:  term,
+		Index: index,
+	}
+}
+
+func newAppRespReject(appSender, appResponder, term, index, rejectHint uint64) *raftpb.Message {
+	return &raftpb.Message{
+		Type:       raftpb.MsgAppResp,
+		To:         appSender,
+		From:       appResponder,
+		Term:       term,
+		Index:      index,
+		Reject:     true,
+		RejectHint: rejectHint,
 	}
 }

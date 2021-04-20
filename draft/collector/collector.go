@@ -224,7 +224,7 @@ func (c *LinkedListCollector) locateEntries(term uint64) Collector {
 
 func (c *LinkedListCollector) regularizedAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
 	if c.head == nil {
-		c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
+		c.addSubAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 		return
 	}
 
@@ -242,18 +242,18 @@ func (c *LinkedListCollector) regularizedAddEntries(entries []raftpb.Entry, logT
 		needle = needle.next
 	}
 
-	c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
+	c.addSubAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 }
 
 func (c *LinkedListCollector) addEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) {
 	if c.head == nil {
-		c.addSubCollectorAndMoveToTail()
+		c.addSubAndMoveToTail()
 	}
 
 	c.tail.brief = nil
 
 	if ok := c.tail.AddEntries(entries, logTerm, logIndex); !ok {
-		c.addSubCollectorAndMoveToTail().AddEntries(entries, logTerm, logIndex)
+		c.addSubAndMoveToTail().AddEntries(entries, logTerm, logIndex)
 	}
 }
 
@@ -280,7 +280,7 @@ func (c *LinkedListCollector) regularize() {
 			needle.brief = nil
 
 			if needle.IsNotInitialized() {
-				needle = c.tryRemoveSubCollectorAndMoveToNext(needle)
+				needle = c.tryRmvSubAndMoveToNext(needle)
 				continue
 			}
 
@@ -294,7 +294,7 @@ func (c *LinkedListCollector) regularize() {
 					break
 				}
 
-				next = c.tryRemoveSubCollectorAndMoveToNext(next)
+				next = c.tryRmvSubAndMoveToNext(next)
 			}
 
 			needle = needle.next
@@ -308,7 +308,7 @@ func (c *LinkedListCollector) regularize() {
 	c.regularized = true
 }
 
-func (c *LinkedListCollector) addSubCollectorAndMoveToTail() *subCollector {
+func (c *LinkedListCollector) addSubAndMoveToTail() *subCollector {
 	if c.head == nil {
 		c.head = &subCollector{Collector: c.cg()}
 		c.tail = c.head
@@ -320,7 +320,7 @@ func (c *LinkedListCollector) addSubCollectorAndMoveToTail() *subCollector {
 	return c.tail
 }
 
-func (c *LinkedListCollector) tryRemoveSubCollectorAndMoveToNext(sc *subCollector) *subCollector {
+func (c *LinkedListCollector) tryRmvSubAndMoveToNext(sc *subCollector) *subCollector {
 	if c.head == sc {
 		if sc.next == nil {
 			return nil

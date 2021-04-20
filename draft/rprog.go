@@ -2,7 +2,9 @@ package draft
 
 import (
 	"go.etcd.io/etcd/draft/collector"
+	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
+	"sort"
 )
 
 type RackProgressDescriptor struct {
@@ -35,13 +37,348 @@ type RackProgressAnalyzer interface {
 	// If analyzer does not accept the offer, return false.
 	TryOfferCollector(term, termHolder, latestCommit uint64, c collector.EntryFragmentCollector) bool
 
-	TryOfferEntries(logTerm, logIndex, commit uint64, ent []raftpb.Entry) (bool, uint64)
+	TryOfferEntries(logTerm, logIndex, commit uint64, ent []raftpb.Entry) bool
 
 	ConfirmLeadership(term, tHolder uint64) bool
 
 	LastIndex() uint64
 
 	Commit() uint64
+}
+
+type MimicRaftKernelAnalyzer struct {
+	term    uint64
+	tHolder uint64
+	commit  uint64
+
+	compacted     *collector.MimicRaftKernelBriefCollector
+	beforeCompact *collector.MimicRaftKernelCollector
+
+	beforeAnalysis  []*collector.EntryFragment
+	beforeCommitted uint64
+	beforeTerm      uint64
+	beforeTHolder   uint64
+
+	remoteOffer bool
+	remoteJoin  bool
+}
+
+func (an *MimicRaftKernelAnalyzer) OfferLocalVote(oTerm, oTHolder uint64) {
+	if oTerm < an.term {
+		return
+	}
+
+	switch {
+	case oTerm < an.beforeTerm:
+	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
+	default:
+		an.beforeTerm = oTerm
+		an.beforeTHolder = oTHolder
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) OfferRemoteVote(oTerm, oTHolder uint64) {
+	if oTerm < an.term {
+		return
+	}
+
+	switch {
+	case oTerm < an.beforeTerm:
+	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
+	default:
+		an.beforeTerm = oTerm
+		an.beforeTHolder = oTHolder
+		an.remoteOffer = true
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, committed, prevLogTerm uint64, ent []raftpb.Entry) {
+	if oTerm < an.term {
+		return
+	}
+
+	// update term
+	switch {
+	case oTerm < an.beforeTerm:
+	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
+	default:
+		an.beforeTerm = oTerm
+		an.beforeTHolder = raft.None
+	}
+
+	if len(ent) == 0 {
+		return
+	}
+
+	if ent[0].Index <= an.commit {
+		// filter out stale messages
+		return
+	}
+
+	f := &collector.EntryFragment{
+		LogTerm:  prevLogTerm,
+		LogIndex: ent[0].Index - 1,
+		Fragment: ent,
+		CTerm:    oTerm,
+	}
+
+	an.beforeAnalysis = append(an.beforeAnalysis, f)
+	if an.beforeCommitted < committed {
+		an.beforeCommitted = committed
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, committed uint64, efc collector.EntryFragmentCollector) {
+	if oTerm < an.term {
+		return
+	}
+
+	// update term
+	switch {
+	case oTerm < an.beforeTerm:
+	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
+	default:
+		an.beforeTerm = oTerm
+		an.beforeTHolder = raft.None
+		an.remoteOffer = true
+	}
+
+	if ok, fs := efc.FetchFragmentsWithStartIndex(an.commit + 1); !efc.IsNotInitialized() && ok {
+		an.remoteOffer = true
+		an.beforeAnalysis = append(an.beforeAnalysis, fs...)
+		if an.beforeCommitted < committed {
+			an.beforeCommitted = committed
+		}
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) HasRemoteOffer() bool {
+	return an.remoteOffer
+}
+
+func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
+	// whenever happens, update term first
+	if an.beforeTerm > an.term {
+		an.term = an.beforeTerm
+		an.tHolder = an.beforeTHolder
+	}
+
+	if len(an.beforeAnalysis) == 0 {
+		return
+	}
+
+	// sorting fragments
+	sort.Slice(an.beforeAnalysis, func(i, j int) bool {
+		return an.beforeAnalysis[i].CTerm < an.beforeAnalysis[j].CTerm
+	})
+
+	if an.compacted.IsEmpty() || an.compacted.IsNotInitialized() {
+		an.analyzeWithoutCompacted()
+	} else {
+		an.analyzeWithCompacted()
+	}
+
+	an.beforeAnalysis = an.beforeAnalysis[:0]
+	an.remoteOffer = false
+}
+
+func (an *MimicRaftKernelAnalyzer) HasRemoteOfferJoin() bool {
+	if len(an.beforeAnalysis) != 0 {
+		panic("some fragments are still no analyzed")
+	}
+
+	return an.remoteJoin
+}
+
+func (an *MimicRaftKernelAnalyzer) Committed() uint64 {
+	if len(an.beforeAnalysis) != 0 {
+		panic("some fragments are still no analyzed")
+	}
+
+	return an.commit
+}
+
+func (an *MimicRaftKernelAnalyzer) Term() uint64 {
+	if len(an.beforeAnalysis) != 0 {
+		panic("some fragments are still no analyzed")
+	}
+
+	return an.term
+}
+
+func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
+	if len(an.beforeAnalysis) != 0 {
+		panic("some fragments are still no analyzed")
+	}
+
+	if an.beforeCompact.IsNotInitialized() {
+		return noProgress()
+	}
+
+	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
+
+	return newProgress(an.term, an.tHolder, an.commit, logTerm, logIndex, ent)
+}
+
+func (an *MimicRaftKernelAnalyzer) RemoteProgress() *RackProgressDescriptor {
+	if len(an.beforeAnalysis) != 0 {
+		panic("some fragments are still left unprocessed")
+	}
+
+	if !an.remoteOffer || an.beforeCompact.IsNotInitialized() {
+		return noProgress()
+	}
+
+	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
+
+	return newProgress(an.term, an.tHolder, an.commit, logTerm, logIndex, ent)
+}
+
+func (an *MimicRaftKernelAnalyzer) Compact() {
+	if an.beforeCompact.IsEmpty() {
+		return
+	}
+
+	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
+	an.compacted.AddEntriesToBrief(ent, logTerm, logIndex)
+	an.beforeCompact.Refresh()
+}
+
+func (an *MimicRaftKernelAnalyzer) MatchIndex(index, term uint64) collector.Location {
+	if an.IsEmpty() {
+		panic("unable to access empty records")
+	}
+
+	if an.compacted.IsEmpty() {
+		return an.beforeCompact.MatchIndex(index, term)
+	}
+
+	if an.beforeCompact.IsEmpty() {
+		return an.compacted.MatchIndex(index, term)
+	}
+
+	res := an.compacted.MatchIndex(index, term)
+	switch res {
+	case collector.UNDERFLOW:
+		panic("underflow occurs when matching index")
+	case collector.OVERFLOW:
+		res = an.beforeCompact.MatchIndex(index, term)
+		if res == collector.UNDERFLOW {
+			panic("there is a gap between compacted and beforeCompact")
+		}
+		return res
+	default:
+		return res
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) PrevLogTerm() uint64 {
+	if an.IsEmpty() {
+		panic("unable to access empty records")
+	}
+
+	if an.compacted.IsEmpty() {
+		return an.beforeCompact.PrevLogTerm()
+	}
+
+	return an.compacted.PrevLogTerm()
+}
+
+func (an *MimicRaftKernelAnalyzer) FirstIndex() uint64 {
+	if an.IsEmpty() {
+		panic("unable to access empty records")
+	}
+
+	if an.compacted.IsEmpty() {
+		return an.beforeCompact.FirstIndex()
+	}
+
+	return an.compacted.FirstIndex()
+}
+
+func (an *MimicRaftKernelAnalyzer) LastIndex() uint64 {
+	if an.IsEmpty() {
+		panic("unable to access empty records")
+	}
+
+	if an.beforeCompact.IsEmpty() {
+		return an.compacted.LastIndex()
+	}
+
+	return an.beforeCompact.LastIndex()
+}
+
+func (an *MimicRaftKernelAnalyzer) IsEmpty() bool {
+	return an.compacted.IsEmpty() && an.beforeCompact.IsEmpty()
+}
+
+func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
+	for _, f := range an.beforeAnalysis {
+		// try to anchor it in the compacted analysis
+		switch an.compacted.MatchIndex(f.LogIndex, f.LogTerm) {
+		case collector.UNDERFLOW:
+			panic("an underflow occurs in compacted analysis")
+		case collector.WITHIN, collector.PREV, collector.OVERFLOW:
+			// matched in compacted analysis, resize the
+			ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			if !ok && loc == collector.UNDERFLOW {
+				// refresh beforeCompact with this fragment
+				an.beforeCompact.Refresh()
+				an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			}
+		}
+	}
+
+	if an.beforeCompact.IsEmpty() {
+		return
+	}
+
+	prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
+	switch an.compacted.MatchIndex(prevLogTerm, firstIndex-1) {
+	case collector.UNDERFLOW:
+		panic("an underflow occurs in consistency check")
+	case collector.PREV, collector.WITHIN:
+		// resize compacted to fit beforeCompact
+		an.compacted.ResizeBriefToIndex(firstIndex - 1)
+		lastIndex := an.beforeCompact.LastIndex()
+		if an.beforeCommitted < lastIndex {
+			an.updateCommit(an.beforeCommitted)
+		} else {
+			an.updateCommit(lastIndex)
+		}
+		an.beforeCommitted = an.commit
+	case collector.CONFLICT:
+		panic("an conflict occurs in consistency check")
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
+	for _, f := range an.beforeAnalysis {
+		ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+		if !ok && loc == collector.UNDERFLOW {
+			// refresh beforeCompact with this fragment
+			an.beforeCompact.Refresh()
+			an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+		}
+	}
+
+	if an.beforeCompact.IsEmpty() {
+		return
+	}
+
+	lastIndex := an.beforeCompact.LastIndex()
+	if an.beforeCommitted < lastIndex {
+		an.updateCommit(an.beforeCommitted)
+	} else {
+		an.updateCommit(lastIndex)
+	}
+	an.beforeCommitted = an.commit
+}
+
+func (an *MimicRaftKernelAnalyzer) updateCommit(committed uint64) {
+	if committed > an.commit {
+		an.commit = committed
+	}
 }
 
 type CACMergeType func(commit uint64, major collector.Collector, minor []collector.EntryFragmentCollector, minorCommit []uint64) uint64
@@ -58,7 +395,7 @@ type CollectorAnalyzer struct {
 	minorCommit []uint64
 
 	cachedMajorTable []*collector.BriefSegment
-	compacted        *collector.BriefSegmentCollector
+	compacted        *collector.MimicRaftKernelBriefCollector
 
 	cMerge CACMergeType
 	bMerge CABMergeType
@@ -134,20 +471,14 @@ func (ca *CollectorAnalyzer) TryOfferCollector(term, termHolder, latestCommit ui
 	return true
 }
 
-func (ca *CollectorAnalyzer) TryOfferEntries(logTerm, logIndex, commit uint64, ent []raftpb.Entry) (bool, uint64) {
+func (ca *CollectorAnalyzer) TryOfferEntries(logTerm, logIndex, commit uint64, ent []raftpb.Entry) bool {
 	ca.upgrade()
 
-	if ok, lastNewIndex := ca.compacted.AbsorbEntries(logTerm, logIndex, ent); ok {
-		if lastNewIndex < commit {
-			ca.commit = lastNewIndex
-		} else {
-			ca.commit = commit
-		}
-		ca.compacted.SetCommit(ca.commit)
-		return true, lastNewIndex
+	if ca.compacted.AddEntriesToBrief(ent, logTerm, logIndex) {
+
 	}
 
-	return false, 0
+	return false
 }
 
 func (ca *CollectorAnalyzer) ConfirmLeadership(term, tHolder uint64) bool {
@@ -167,7 +498,7 @@ func (ca *CollectorAnalyzer) ConfirmLeadership(term, tHolder uint64) bool {
 
 func (ca *CollectorAnalyzer) LastIndex() uint64 {
 	ca.upgrade()
-	if ca.compacted.IsInitialized() {
+	if ca.compacted.IsNotInitialized() {
 		return 0
 	}
 

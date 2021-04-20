@@ -161,21 +161,8 @@ func (c *MultiFragmentsCollector) fetchFragments(index uint64) []*EntryFragment 
 	var result []*EntryFragment
 	needle := c.fec.head
 
-	meet := false
-
 	for needle != nil {
-		if !meet {
-			if ok, ent, logTerm, logIndex := needle.FetchEntriesWithStartIndex(index); ok {
-				meet = true
-				result = append(result, &EntryFragment{
-					LogTerm:  logTerm,
-					LogIndex: logIndex,
-					Fragment: ent,
-					CTerm:    needle.info,
-				})
-			}
-		} else {
-			_, ent, logTerm, logIndex := needle.FetchAllEntries()
+		if ok, ent, logTerm, logIndex := needle.FetchEntriesWithStartIndex(index); ok {
 			result = append(result, &EntryFragment{
 				LogTerm:  logTerm,
 				LogIndex: logIndex,
