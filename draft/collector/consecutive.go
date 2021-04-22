@@ -332,100 +332,6 @@ func (c *MimicRaftKernelCollector) mimic(entries []raftpb.Entry, logTerm, logInd
 	return true, loc
 }
 
-func (c *MimicRaftKernelCollector) addEntries(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, bool) {
-	if c.content == nil || logIndex <= c.logIndex {
-		c.init(entries, logTerm, logIndex)
-		return true, false
-	}
-
-	if logIndex > c.nextIndex {
-		return false, false
-	}
-
-	var oldLen = len(c.content)
-	var truncated = false
-
-	if !c.checkIfAppendable(logTerm, logIndex) {
-		checkLen := c.rmvEntries(logTerm, logIndex)
-		truncated = checkLen != oldLen
-		if !c.checkIfAppendable(logTerm, logIndex) {
-			return false, truncated
-		}
-		oldLen = checkLen
-	}
-
-	var newLen = len(entries)
-
-	if oldLen == 0 {
-		c.init(entries, logTerm, logIndex)
-		return true, truncated
-	}
-
-	if newLen == 0 {
-		return true, truncated
-	}
-
-	if !c.copied {
-		content := make([]raftpb.Entry, oldLen, 2*(oldLen+newLen))
-		copy(content, c.content[:oldLen])
-		c.copied = true
-		c.content = append(content, entries...)
-	} else {
-		c.content = c.content[:oldLen]
-		c.content = append(c.content, entries...)
-	}
-
-	c.nextIndex = entries[newLen-1].Index + 1
-
-	return true, truncated
-}
-
-func (c *MimicRaftKernelCollector) rmvEntries(logTerm, logIndex uint64) int {
-	if len(c.content) == 0 {
-		return 0
-	}
-
-	var cLen = len(c.content)
-	if c.nextIndex-1 == logIndex && c.content[cLen-1].Term == logTerm {
-		return cLen
-	}
-
-	legal, idx := c.locateEntryWithLogIndex(logIndex)
-
-	if legal {
-		if c.content[idx].Term == logTerm {
-			return c.resize(idx+1, logTerm, logIndex)
-		}
-
-		term := c.content[idx].Term
-		_, idx = c.locateFirstEntryWithTerm(term, 0, idx+1)
-
-		if idx == 0 {
-			return c.resize(0, logTerm, logIndex)
-		}
-
-		idx--
-		term = c.content[idx].Term
-
-		for term > logTerm {
-			_, idx = c.locateFirstEntryWithTerm(term, 0, idx+1)
-			if idx == 0 {
-				break
-			}
-			idx--
-			term = c.content[idx].Term
-		}
-
-		return c.resize(idx, logTerm, logIndex)
-	}
-
-	if idx < 0 {
-		return c.resize(0, logTerm, logIndex)
-	}
-
-	return len(c.content)
-}
-
 func (c *MimicRaftKernelCollector) resize(length int, logTerm, logIndex uint64) int {
 	if length >= len(c.content) {
 		return len(c.content)
@@ -572,16 +478,4 @@ func (c *MimicRaftKernelCollector) locateCachedTableWithTerm(term uint64, from, 
 	}
 
 	return false, 0, 0
-}
-
-func (c *MimicRaftKernelCollector) checkIfAppendable(logTerm, logIndex uint64) bool {
-	if len(c.content) == 0 {
-		return true
-	}
-
-	if c.nextIndex == logIndex+1 {
-		return c.content[len(c.content)-1].Term == logTerm
-	}
-
-	return false
 }
