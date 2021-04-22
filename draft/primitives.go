@@ -15,8 +15,11 @@ type Update struct {
 
 	Collected collector.EntryFragmentCollector
 	Commit    uint64
-	VoteMsg   *raftpb.Message
-	Err       error
+
+	EverVote *raftpb.Message
+	VotePend bool
+
+	Err error
 }
 
 func errUpdate(file string, err error) *Update {
@@ -40,7 +43,7 @@ func newUpdate(file string, term uint64, c collector.EntryFragmentCollector, com
 		ZeroDelta:  false,
 		Collected:  c,
 		Commit:     commit,
-		VoteMsg:    vote,
+		EverVote:   vote,
 	}
 }
 
