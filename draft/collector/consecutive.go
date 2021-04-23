@@ -21,6 +21,8 @@ type Locator interface {
 	//	5. CONFLICT: find the conflict record in the entry array or in the tuple (prevLogIndex, prevLogTerm)
 	MatchIndex(index, term uint64) Location
 
+	LocateIndex(index uint64) (Location, uint64)
+
 	PrevLogTerm() uint64
 	FirstIndex() uint64
 	LastIndex() uint64
@@ -122,7 +124,7 @@ func (c *MimicRaftKernelCollector) FetchEntriesWithStartIndex(index uint64) (boo
 		return false, nil, 0, 0
 	}
 
-	_, idx := c.locateEntryWithLogIndex(index - 1)
+	_, idx := c.locateEntryWithIndex(index)
 	before := &c.content[idx-1]
 	return true, c.content[idx:], before.Term, before.Index
 }
@@ -212,7 +214,7 @@ func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) Location {
 		} else {
 			return PREV
 		}
-	} else if ok, idx := c.locateEntryWithLogIndex(index); !ok {
+	} else if ok, idx := c.locateEntryWithIndex(index); !ok {
 		// overflow, quit
 		return OVERFLOW
 	} else {
@@ -222,6 +224,24 @@ func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) Location {
 		} else {
 			return WITHIN
 		}
+	}
+}
+
+func (c *MimicRaftKernelCollector) LocateIndex(index uint64) (Location, uint64) {
+	if c.IsNotInitialized() {
+		panic("not initialized")
+	}
+
+	if c.logIndex > index {
+		// underflow, quit
+		return UNDERFLOW, 0
+	} else if c.logIndex == index {
+		return PREV, c.logTerm
+	} else if ok, idx := c.locateEntryWithIndex(index); !ok {
+		// overflow, quit
+		return OVERFLOW, 0
+	} else {
+		return WITHIN, c.content[idx].Term
 	}
 }
 
@@ -300,7 +320,7 @@ func (c *MimicRaftKernelCollector) mimic(entries []raftpb.Entry, logTerm, logInd
 	}
 
 	// find conflicts in entries
-	_, cIdx := c.locateEntryWithLogIndex(logIndex + 1)
+	_, cIdx := c.locateEntryWithIndex(logIndex + 1)
 	cLen := len(c.content)
 	eIdx, eLen := 0, len(entries)
 
@@ -354,8 +374,8 @@ func (c *MimicRaftKernelCollector) resize(length int, logTerm, logIndex uint64) 
 	return length
 }
 
-func (c *MimicRaftKernelCollector) locateEntryWithLogIndex(logIndex uint64) (bool, int) {
-	rel := int(logIndex - c.logIndex - 1)
+func (c *MimicRaftKernelCollector) locateEntryWithIndex(index uint64) (bool, int) {
+	rel := int(index - c.logIndex - 1)
 	return rel >= 0 && rel < len(c.content), rel
 }
 

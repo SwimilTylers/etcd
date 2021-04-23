@@ -19,31 +19,20 @@ type RackProgressDescriptor struct {
 	Entries  []raftpb.Entry
 }
 
-//RackProgressAnalyzer analyzes the current progress of the specific rack.
-type RackProgressAnalyzer interface {
-	//InitAs initializes RackProgressAnalyzer with the specific RackProgressDescriptor forcefully.
-	// If there are latent variables and buffered entries, clear it out.
-	InitAs(d *RackProgressDescriptor)
+func noProgress() *RackProgressDescriptor {
+	return &RackProgressDescriptor{NoProgress: true}
+}
 
-	//Progress gets the latest progress since the last Progress call.
-	// This operation triggers the analysis and clears out buffer.
-	Progress() (*RackProgressDescriptor, error)
-
-	//MuteLastOffer mutes the last successful TryOfferCollector or TryOfferEntries. Notice that the
-	// offer will not be diminished. If some new offer
-	MuteLastOffer()
-
-	//TryOfferCollector buffers EntryFragmentCollector to RackProgressAnalyzer for analysis.
-	// If analyzer does not accept the offer, return false.
-	TryOfferCollector(term, termHolder, latestCommit uint64, c collector.EntryFragmentCollector) bool
-
-	TryOfferEntries(logTerm, logIndex, commit uint64, ent []raftpb.Entry) bool
-
-	ConfirmLeadership(term, tHolder uint64) bool
-
-	LastIndex() uint64
-
-	Commit() uint64
+func newProgress(term, tHolder, commit, logTerm, logIndex uint64, ent []raftpb.Entry) *RackProgressDescriptor {
+	return &RackProgressDescriptor{
+		NoProgress: false,
+		Term:       term,
+		TermHolder: tHolder,
+		LogTerm:    logTerm,
+		LogIndex:   logIndex,
+		Commit:     commit,
+		Entries:    ent,
+	}
 }
 
 type MimicRaftKernelAnalyzer struct {
@@ -53,49 +42,24 @@ type MimicRaftKernelAnalyzer struct {
 
 	compacted     *collector.MimicRaftKernelBriefCollector
 	beforeCompact *collector.MimicRaftKernelCollector
+	bcCTerm       uint64
+	bcCTHolder    uint64
 
-	beforeAnalysis  []*collector.EntryFragment
-	beforeCommitted uint64
-	beforeTerm      uint64
-	beforeTHolder   uint64
+	analyzed bool
 
-	remoteOffer bool
-	remoteJoin  bool
+	beforeAnalysis    []*collector.EntryFragment
+	beforeFingerprint map[*collector.EntryFragment]uint64
+	beforeCommitted   uint64
+	beforeTerm        uint64
+	beforeTHolder     uint64
 }
 
-func (an *MimicRaftKernelAnalyzer) OfferLocalVote(oTerm, oTHolder uint64) {
+func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prevLogTerm uint64, ent []raftpb.Entry) {
 	if oTerm < an.term {
 		return
 	}
 
-	switch {
-	case oTerm < an.beforeTerm:
-	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
-	default:
-		an.beforeTerm = oTerm
-		an.beforeTHolder = oTHolder
-	}
-}
-
-func (an *MimicRaftKernelAnalyzer) OfferRemoteVote(oTerm, oTHolder uint64) {
-	if oTerm < an.term {
-		return
-	}
-
-	switch {
-	case oTerm < an.beforeTerm:
-	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
-	default:
-		an.beforeTerm = oTerm
-		an.beforeTHolder = oTHolder
-		an.remoteOffer = true
-	}
-}
-
-func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, committed, prevLogTerm uint64, ent []raftpb.Entry) {
-	if oTerm < an.term {
-		return
-	}
+	an.analyzed = false
 
 	// update term
 	switch {
@@ -103,7 +67,7 @@ func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, committed, prevLogTe
 	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
 	default:
 		an.beforeTerm = oTerm
-		an.beforeTHolder = raft.None
+		an.beforeTHolder = oId
 	}
 
 	if len(ent) == 0 {
@@ -123,15 +87,18 @@ func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, committed, prevLogTe
 	}
 
 	an.beforeAnalysis = append(an.beforeAnalysis, f)
+	an.beforeFingerprint[f] = oId
 	if an.beforeCommitted < committed {
 		an.beforeCommitted = committed
 	}
 }
 
-func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, committed uint64, efc collector.EntryFragmentCollector) {
+func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint64, efc collector.EntryFragmentCollector) {
 	if oTerm < an.term {
 		return
 	}
+
+	an.analyzed = false
 
 	// update term
 	switch {
@@ -139,21 +106,18 @@ func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, committed uint64, e
 	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
 	default:
 		an.beforeTerm = oTerm
-		an.beforeTHolder = raft.None
-		an.remoteOffer = true
+		an.beforeTHolder = oId
 	}
 
 	if ok, fs := efc.FetchFragmentsWithStartIndex(an.commit + 1); !efc.IsNotInitialized() && ok {
-		an.remoteOffer = true
 		an.beforeAnalysis = append(an.beforeAnalysis, fs...)
+		for _, f := range fs {
+			an.beforeFingerprint[f] = oId
+		}
 		if an.beforeCommitted < committed {
 			an.beforeCommitted = committed
 		}
 	}
-}
-
-func (an *MimicRaftKernelAnalyzer) HasRemoteOffer() bool {
-	return an.remoteOffer
 }
 
 func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
@@ -163,7 +127,7 @@ func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
 		an.tHolder = an.beforeTHolder
 	}
 
-	if len(an.beforeAnalysis) == 0 {
+	if an.analyzed {
 		return
 	}
 
@@ -178,20 +142,13 @@ func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
 		an.analyzeWithCompacted()
 	}
 
+	an.analyzed = true
 	an.beforeAnalysis = an.beforeAnalysis[:0]
-	an.remoteOffer = false
-}
-
-func (an *MimicRaftKernelAnalyzer) HasRemoteOfferJoin() bool {
-	if len(an.beforeAnalysis) != 0 {
-		panic("some fragments are still no analyzed")
-	}
-
-	return an.remoteJoin
+	an.beforeFingerprint = make(map[*collector.EntryFragment]uint64)
 }
 
 func (an *MimicRaftKernelAnalyzer) Committed() uint64 {
-	if len(an.beforeAnalysis) != 0 {
+	if !an.analyzed {
 		panic("some fragments are still no analyzed")
 	}
 
@@ -199,39 +156,54 @@ func (an *MimicRaftKernelAnalyzer) Committed() uint64 {
 }
 
 func (an *MimicRaftKernelAnalyzer) Term() uint64 {
-	if len(an.beforeAnalysis) != 0 {
+	if !an.analyzed {
 		panic("some fragments are still no analyzed")
 	}
 
 	return an.term
 }
 
-func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
-	if len(an.beforeAnalysis) != 0 {
+func (an *MimicRaftKernelAnalyzer) TermAndTHolder() (uint64, uint64) {
+	if !an.analyzed {
 		panic("some fragments are still no analyzed")
 	}
 
-	if an.beforeCompact.IsNotInitialized() {
-		return noProgress()
-	}
-
-	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
-
-	return newProgress(an.term, an.tHolder, an.commit, logTerm, logIndex, ent)
+	return an.term, an.tHolder
 }
 
-func (an *MimicRaftKernelAnalyzer) RemoteProgress() *RackProgressDescriptor {
-	if len(an.beforeAnalysis) != 0 {
-		panic("some fragments are still left unprocessed")
+func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
+	if !an.analyzed {
+		panic("some fragments are still no analyzed")
 	}
 
-	if !an.remoteOffer || an.beforeCompact.IsNotInitialized() {
+	if an.beforeCompact.IsEmpty() {
 		return noProgress()
 	}
 
 	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
 
-	return newProgress(an.term, an.tHolder, an.commit, logTerm, logIndex, ent)
+	switch an.compacted.MatchIndex(logIndex, logTerm) {
+	case collector.UNDERFLOW:
+		panic("underflow occurs when delivering progress")
+	case collector.PREV, collector.WITHIN:
+		return newProgress(an.bcCTerm, an.bcCTHolder, an.commit, logTerm, logIndex, ent)
+	default:
+		return noProgress()
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) UncheckedProgress() *RackProgressDescriptor {
+	if !an.analyzed {
+		panic("some fragments are still no analyzed")
+	}
+
+	if an.beforeCompact.IsEmpty() {
+		return noProgress()
+	}
+
+	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
+
+	return newProgress(an.bcCTerm, an.bcCTHolder, an.commit, logTerm, logIndex, ent)
 }
 
 func (an *MimicRaftKernelAnalyzer) Compact() {
@@ -242,6 +214,41 @@ func (an *MimicRaftKernelAnalyzer) Compact() {
 	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
 	an.compacted.AddEntriesToBrief(ent, logTerm, logIndex)
 	an.beforeCompact.Refresh()
+}
+
+func (an *MimicRaftKernelAnalyzer) CompactBefore(index uint64) collector.Location {
+	if an.beforeCompact.IsEmpty() {
+		return collector.UNDERFLOW
+	}
+
+	location, _ := an.beforeCompact.LocateIndex(index)
+
+	switch location {
+	case collector.CONFLICT:
+		panic("detect conflict during locating index in beforeCompact")
+	case collector.WITHIN:
+		_, nEnt, nLogTerm, nLogIndex := an.beforeCompact.FetchEntriesWithStartIndex(index)
+		_, aEnt, aLogTerm, aLogIndex := an.beforeCompact.FetchAllEntries()
+		aheadLen := len(aEnt) - len(nEnt)
+		aEnt = aEnt[:aheadLen]
+		an.compacted.AddEntriesToBrief(aEnt, aLogTerm, aLogIndex)
+		an.beforeCompact.Refresh()
+		an.beforeCompact.AddEntries(nEnt, nLogTerm, nLogIndex)
+	case collector.OVERFLOW:
+		_, aEnt, aLogTerm, aLogIndex := an.beforeCompact.FetchAllEntries()
+		an.compacted.AddEntriesToBrief(aEnt, aLogTerm, aLogIndex)
+		an.beforeCompact.Refresh()
+	}
+
+	return location
+}
+
+func (an *MimicRaftKernelAnalyzer) MatchIndexInCompact(index, term uint64) (bool, collector.Location) {
+	if an.compacted.IsEmpty() {
+		return false, collector.OVERFLOW
+	}
+
+	return true, an.compacted.MatchIndex(index, term)
 }
 
 func (an *MimicRaftKernelAnalyzer) MatchIndex(index, term uint64) collector.Location {
@@ -269,6 +276,34 @@ func (an *MimicRaftKernelAnalyzer) MatchIndex(index, term uint64) collector.Loca
 		return res
 	default:
 		return res
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) LocateIndex(index uint64) (collector.Location, uint64) {
+	if an.IsEmpty() {
+		panic("unable to access empty records")
+	}
+
+	if an.compacted.IsEmpty() {
+		return an.beforeCompact.LocateIndex(index)
+	}
+
+	if an.beforeCompact.IsEmpty() {
+		return an.compacted.LocateIndex(index)
+	}
+
+	res, term := an.compacted.LocateIndex(index)
+	switch res {
+	case collector.UNDERFLOW:
+		panic("underflow occurs when matching index")
+	case collector.OVERFLOW:
+		res, term = an.beforeCompact.LocateIndex(index)
+		if res == collector.UNDERFLOW {
+			panic("there is a gap between compacted and beforeCompact")
+		}
+		return res, term
+	default:
+		return res, term
 	}
 }
 
@@ -321,10 +356,16 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
 		case collector.WITHIN, collector.PREV, collector.OVERFLOW:
 			// matched in compacted analysis, resize the
 			ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
-			if !ok && loc == collector.UNDERFLOW {
+			switch {
+			case ok:
+				an.bcCTHolder = an.beforeFingerprint[f]
+			case !ok && loc == collector.UNDERFLOW:
 				// refresh beforeCompact with this fragment
 				an.beforeCompact.Refresh()
-				an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
+					an.bcCTerm = f.CTerm
+					an.bcCTHolder = an.beforeFingerprint[f]
+				}
 			}
 		}
 	}
@@ -336,6 +377,7 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
 	prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
 	switch an.compacted.MatchIndex(prevLogTerm, firstIndex-1) {
 	case collector.UNDERFLOW:
+		// beforeCompact has more advanced index
 		panic("an underflow occurs in consistency check")
 	case collector.PREV, collector.WITHIN:
 		// resize compacted to fit beforeCompact
@@ -355,10 +397,16 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
 func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
 	for _, f := range an.beforeAnalysis {
 		ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
-		if !ok && loc == collector.UNDERFLOW {
+		switch {
+		case ok:
+			an.bcCTHolder = an.beforeFingerprint[f]
+		case !ok && loc == collector.UNDERFLOW:
 			// refresh beforeCompact with this fragment
 			an.beforeCompact.Refresh()
-			an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
+				an.bcCTerm = f.CTerm
+				an.bcCTHolder = an.beforeFingerprint[f]
+			}
 		}
 	}
 
@@ -378,194 +426,5 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
 func (an *MimicRaftKernelAnalyzer) updateCommit(committed uint64) {
 	if committed > an.commit {
 		an.commit = committed
-	}
-}
-
-type CACMergeType func(commit uint64, major collector.Collector, minor []collector.EntryFragmentCollector, minorCommit []uint64) uint64
-type CABMergeType func(s0, s1 []*collector.BriefSegment) []*collector.BriefSegment
-
-//CollectorAnalyzer employs several types of Collector to analyze progress and resolve conflicts
-// between different information sources. The analyzer uses a array of minor collectors to record
-// the incoming offers. TryOfferEntries buffers entries directly to the first minor collector.
-// TryOfferCollector appends the incoming Collector to the minor collector array. Before analysis,
-// the analyzer will launch collector merging (cMerge) or brief segment merging (bMerge).
-type CollectorAnalyzer struct {
-	majorSeq    collector.Collector
-	minorSeq    []collector.EntryFragmentCollector
-	minorCommit []uint64
-
-	cachedMajorTable []*collector.BriefSegment
-	compacted        *collector.MimicRaftKernelBriefCollector
-
-	cMerge CACMergeType
-	bMerge CABMergeType
-
-	term    uint64
-	tHolder uint64
-	commit  uint64
-
-	modified bool
-}
-
-func NewDefaultCollectorAnalyzer() *CollectorAnalyzer {
-	return NewCollectorAnalyzer(
-		collector.NewMimicRaftKernelCollector(),
-		collector.NewSingleFragmentCollector(collector.NewMimicRaftKernelCollector()),
-		CECEFCxMerge,
-		nil,
-	)
-}
-
-func NewCollectorAnalyzer(majorSeq collector.Collector, minorFirstSeq collector.EntryFragmentCollector, cMerge CACMergeType, bMerge CABMergeType) *CollectorAnalyzer {
-	minorSeq := make([]collector.EntryFragmentCollector, 1, 3)
-	minorSeq[0] = minorFirstSeq
-	return &CollectorAnalyzer{majorSeq: majorSeq, minorSeq: minorSeq, cMerge: cMerge, bMerge: bMerge, modified: false}
-}
-
-func (ca *CollectorAnalyzer) InitAs(d *RackProgressDescriptor) {
-	ca.refreshCollectors()
-	ca.destroyCachedMajorTable()
-
-	ca.term = d.Term
-	ca.tHolder = d.TermHolder
-	ca.commit = d.Commit
-
-	ca.majorSeq.AddEntries(d.Entries, d.LogTerm, d.LogIndex)
-
-	ca.modified = true
-}
-
-func (ca *CollectorAnalyzer) Progress() (*RackProgressDescriptor, error) {
-	if !ca.modified {
-		// clear out mute offers
-		ca.refreshCollectors()
-		return noProgress(), nil
-	}
-
-	ca.upgrade()
-	_, ent, lt, li := ca.majorSeq.FetchAllEntries()
-
-	ca.refreshCollectors()
-
-	return newProgress(ca.term, ca.tHolder, ca.commit, lt, li, ent), nil
-}
-
-func (ca *CollectorAnalyzer) MuteLastOffer() {
-	ca.modified = false
-}
-
-func (ca *CollectorAnalyzer) TryOfferCollector(term, termHolder, latestCommit uint64, c collector.EntryFragmentCollector) bool {
-	if !ca.isLegalOffer(latestCommit, term) {
-		return false
-	}
-
-	ca.modified = true
-
-	if term > ca.term {
-		ca.term = term
-		ca.tHolder = termHolder
-	}
-
-	ca.minorSeq = append(ca.minorSeq, c)
-	ca.minorCommit = append(ca.minorCommit, latestCommit)
-	return true
-}
-
-func (ca *CollectorAnalyzer) TryOfferEntries(logTerm, logIndex, commit uint64, ent []raftpb.Entry) bool {
-	ca.upgrade()
-
-	if ca.compacted.AddEntriesToBrief(ent, logTerm, logIndex) {
-
-	}
-
-	return false
-}
-
-func (ca *CollectorAnalyzer) ConfirmLeadership(term, tHolder uint64) bool {
-	if term < ca.term {
-		return false
-	}
-
-	if term == ca.term {
-		return tHolder == ca.tHolder
-	}
-
-	ca.term = term
-	ca.tHolder = tHolder
-
-	return true
-}
-
-func (ca *CollectorAnalyzer) LastIndex() uint64 {
-	ca.upgrade()
-	if ca.compacted.IsNotInitialized() {
-		return 0
-	}
-
-	return ca.compacted.LastIndex()
-}
-
-func (ca *CollectorAnalyzer) Commit() uint64 {
-	return ca.commit
-}
-
-func (ca *CollectorAnalyzer) CMerge() CACMergeType {
-	return ca.cMerge
-}
-
-func (ca *CollectorAnalyzer) SetCMerge(cMerge CACMergeType) {
-	ca.cMerge = cMerge
-}
-
-func (ca *CollectorAnalyzer) BMerge() CABMergeType {
-	return ca.bMerge
-}
-
-func (ca *CollectorAnalyzer) SetBMerge(bMerge CABMergeType) {
-	ca.bMerge = bMerge
-}
-
-func (ca *CollectorAnalyzer) refreshCollectors() {
-	ca.majorSeq.Refresh()
-	ca.minorSeq = ca.minorSeq[:1]
-	ca.minorCommit = ca.minorCommit[:1]
-	ca.minorSeq[0].Refresh()
-}
-
-func (ca *CollectorAnalyzer) destroyCachedMajorTable() {
-	if ca.cachedMajorTable == nil {
-		return
-	}
-
-	ca.cachedMajorTable = ca.cachedMajorTable[:0]
-}
-
-func (ca *CollectorAnalyzer) upgrade() {
-	if !ca.modified {
-		return
-	}
-
-	ca.commit = ca.cMerge(ca.commit, ca.majorSeq, ca.minorSeq, ca.minorCommit)
-	ca.cachedMajorTable = ca.bMerge(ca.cachedMajorTable, ca.majorSeq.Briefing())
-	ca.modified = false
-}
-
-func (ca *CollectorAnalyzer) isLegalOffer(commit, term uint64) bool {
-	return term >= ca.term && commit >= ca.commit
-}
-
-func noProgress() *RackProgressDescriptor {
-	return &RackProgressDescriptor{NoProgress: true}
-}
-
-func newProgress(term, tHolder, commit, logTerm, logIndex uint64, ent []raftpb.Entry) *RackProgressDescriptor {
-	return &RackProgressDescriptor{
-		NoProgress: false,
-		Term:       term,
-		TermHolder: tHolder,
-		LogTerm:    logTerm,
-		LogIndex:   logIndex,
-		Commit:     commit,
-		Entries:    ent,
 	}
 }

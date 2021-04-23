@@ -114,8 +114,31 @@ func (c *MimicRaftKernelBriefCollector) ResizeBriefToIndex(index uint64) (bool, 
 }
 
 func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location {
+	if c.IsNotInitialized() {
+		panic("not initialized")
+	}
 	l, _ := c.matchIndex(index, term)
 	return l
+}
+
+func (c *MimicRaftKernelBriefCollector) LocateIndex(index uint64) (Location, uint64) {
+	if c.IsNotInitialized() {
+		panic("not initialized")
+	}
+
+	first, last := c.b[0].FirstIndex, c.b[len(c.b)-1].LastIndex
+
+	switch {
+	case index < first-1:
+		return UNDERFLOW, -1
+	case index == first-1:
+		return PREV, c.b[0].PrevLogTerm
+	case index > last:
+		return OVERFLOW, -1
+	default:
+		idx := c.locateIndex(index, 0, len(c.b))
+		return WITHIN, c.b[idx].Term
+	}
 }
 
 func (c *MimicRaftKernelBriefCollector) PrevLogTerm() uint64 {
