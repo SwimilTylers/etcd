@@ -11,7 +11,7 @@ type Interpreter interface {
 	IsSupported(m *raftpb.Message) bool
 
 	//Interpret takes in Raft Request and gives out Raft Response
-	Interpret(m *raftpb.Message) *raftpb.Message
+	Interpret(m *raftpb.Message) []*raftpb.Message
 }
 
 type OneToOneInterpreter struct {
@@ -33,18 +33,20 @@ func (itp *OneToOneInterpreter) IsSupported(m *raftpb.Message) bool {
 	return m.Type == raftpb.MsgVote || m.Type == raftpb.MsgApp || m.Type == raftpb.MsgHeartbeat || m.Type == raftpb.MsgDRSync
 }
 
-func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
+func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) []*raftpb.Message {
 	switch m.Type {
 	case raftpb.MsgVote:
-		return itp.interpretVote(m)
-	case raftpb.MsgApp:
-		return itp.interpretApp(m)
-	case raftpb.MsgHeartbeat:
-		if r := itp.interpretApp(m); r != nil {
-			r.Type = raftpb.MsgHeartbeatResp
-			return r
+		if ok, r, f := itp.Locate(m); ok {
+			return itp.interpretVote(r, f, m)
 		}
-		break
+	case raftpb.MsgApp:
+		if ok, r, f := itp.Locate(m); ok {
+			return itp.interpretApp(r, f, m)
+		}
+	case raftpb.MsgHeartbeat:
+		if ok, r, f := itp.Locate(m); ok {
+			return appRes2hbRes(itp.interpretApp(r, f, hb2app(m)))
+		}
 	case raftpb.MsgDRSync:
 		return itp.drSync()
 	}
@@ -52,182 +54,168 @@ func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
 	return nil
 }
 
-func (itp *OneToOneInterpreter) drSync() *raftpb.Message {
+func (itp *OneToOneInterpreter) drSync() []*raftpb.Message {
+	// during drSync, we do not involve voting
 	an := itp.an[itp.syncRack]
-
-	zeroUpdate, _ := itp.getUpdatesFromOtherFiles(itp.syncRack, "", an)
-
-	if zeroUpdate {
-		return nil
-	}
-
-	progress := an.Progress()
-
-	if progress.NoProgress {
-		return nil
-	}
-
-	return &raftpb.Message{
-		Type:    raftpb.MsgApp,
-		From:    progress.TermHolder,
-		Term:    progress.Term,
-		LogTerm: progress.LogTerm,
-		Index:   progress.LogIndex,
-		Entries: progress.Entries,
-		Commit:  progress.Commit,
-	}
-}
-
-func (itp *OneToOneInterpreter) interpretVote(m *raftpb.Message) *raftpb.Message {
-	var toRack, toFile string
-	var rOk, fOk bool
-
-	if toRack, rOk = itp.p2r[m.To]; !rOk {
-		itp.lg.Warn("peer id is not bind to any rack", zap.Uint64("peer-id", m.To))
-		return nil
-	}
-
-	if toFile, fOk = itp.p2f[m.From]; !fOk {
-		itp.lg.Warn("peer id is not bind to any file path", zap.Uint64("peer-id", m.From))
-		return nil
-	}
-
-	an := itp.an[toRack]
-
-	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
-		return nil
-	}
-
-	zeroUpdate, vote := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
-
-	if zeroUpdate {
-		return grantVote(m)
-	}
-
-	if vote != nil {
-		if vote.Term > m.Term {
-			// todo: check if legal
-			return &raftpb.Message{
-				Type:   raftpb.MsgVoteResp,
-				To:     m.From,
-				From:   vote.From,
-				Term:   vote.Term,
-				Reject: true,
-			}
-		} else if vote.Term == m.Term {
-			// todo: check if legal
-			return &raftpb.Message{
-				Type:   raftpb.MsgVoteResp,
-				To:     m.From,
-				From:   m.To,
-				Term:   m.Term,
-				Reject: true,
-			}
-		}
-	}
-
-	progress := an.Progress()
-
-	if progress.NoProgress {
-		return grantVote(m)
-	}
-
-	if progress.Term >= m.Term {
-		// todo: check if legal
-		// we find another living leader
-		return &raftpb.Message{
-			Type:    raftpb.MsgApp,
-			To:      m.From,
-			From:    progress.TermHolder,
-			Term:    progress.Term,
-			LogTerm: progress.LogTerm,
-			Index:   progress.LogIndex,
-			Entries: progress.Entries,
-		}
-	}
-
-	if progress.LogIndex <= m.Index && progress.LogTerm <= m.Term {
-		return grantVote(m)
-	} else {
-		// todo: check if legal
-		// though our term is higher, our progress is not
-		return &raftpb.Message{
-			Type:    raftpb.MsgVoteResp,
-			To:      m.From,
-			From:    m.To,
-			Term:    m.Term,
-			Index:   progress.LogIndex,
-			LogTerm: progress.LogTerm,
-			Reject:  true,
-		}
-	}
-}
-
-func (itp *OneToOneInterpreter) interpretApp(m *raftpb.Message) *raftpb.Message {
-	var toRack, toFile string
-	var rOk, fOk bool
-
-	if toRack, rOk = itp.p2r[m.To]; !rOk {
-		itp.lg.Warn("peer id is not bind to any rack", zap.Uint64("peer-id", m.To))
-		return nil
-	}
-
-	if toFile, fOk = itp.p2f[m.From]; !fOk {
-		itp.lg.Warn("peer id is not bind to any file path", zap.Uint64("peer-id", m.From))
-		return nil
-	}
-
-	an := itp.an[toRack]
-
-	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
-		return nil
-	}
-
-	zeroUpdate, vote := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
-
-	if zeroUpdate {
-		// no remote update receive, omit checking remote offer
-
-		// add local offer to analyzer
+	if noUpdates, _ := itp.getUpdatesFromOtherFiles(itp.syncRack, "", an); !noUpdates {
 		an.AnalyzeAndRemoveOffers()
-
-		// safe to compact
-		an.Compact()
-
-		// ready for response
-		return handleAppendEntries(m, an)
-	}
-
-	if vote != nil {
-		if vote.Term > m.Term {
-			an.OfferRemoteVote(vote.Term, vote.From)
-			// our leadership is overthrown
-		}
-
-		return handleAppendEntries(m, an)
-	}
-
-	progress := an.Progress()
-
-	if progress.NoProgress {
-		return handleAppendEntries(m, an)
-	}
-
-	if progress.Term > m.Term {
-		// todo: check if legal
-		// we find another living leader
-		return &raftpb.Message{
-			Type:    raftpb.MsgApp,
-			To:      m.From,
-			From:    progress.TermHolder,
-			Term:    progress.Term,
-			LogTerm: progress.LogTerm,
-			Index:   progress.LogIndex,
-			Entries: progress.Entries,
+		if pg := an.Progress(); !pg.NoProgress {
+			app := redirectAppendEntries(pg)
+			// the prevLogTerm and prevLogIndex of an.beforeCompact
+			// match the record in an.compacted, safe to compact
+			an.Compact()
+			return []*raftpb.Message{app}
 		}
 	}
 
-	return handleAppendEntries(m, an)
+	return nil
+}
+
+func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, toRack, toFile string) {
+	var rOk, fOk bool
+
+	if toRack, rOk = itp.p2r[m.To]; !rOk {
+		itp.lg.Warn("peer id is not bind to any rack", zap.Uint64("peer-id", m.To))
+		return false, "", ""
+	}
+
+	if toFile, fOk = itp.p2f[m.From]; !fOk {
+		itp.lg.Warn("peer id is not bind to any file path", zap.Uint64("peer-id", m.From))
+		return false, "", ""
+	}
+
+	return true, toRack, toFile
+}
+
+func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.Message) []*raftpb.Message {
+	an := itp.an[toRack]
+
+	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
+		return nil
+	}
+
+	// zeroUpdate, vote := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
+
+	/*
+		if zeroUpdate {
+			return grantVote(m)
+		}
+
+		if vote != nil {
+			if vote.Term > m.Term {
+				// todo: check if legal
+				return &raftpb.Message{
+					Type:   raftpb.MsgVoteResp,
+					To:     m.From,
+					From:   vote.From,
+					Term:   vote.Term,
+					Reject: true,
+				}
+			} else if vote.Term == m.Term {
+				// todo: check if legal
+				return &raftpb.Message{
+					Type:   raftpb.MsgVoteResp,
+					To:     m.From,
+					From:   m.To,
+					Term:   m.Term,
+					Reject: true,
+				}
+			}
+		}
+
+		progress := an.Progress()
+
+		if progress.NoProgress {
+			return grantVote(m)
+		}
+
+		if progress.Term >= m.Term {
+			// todo: check if legal
+			// we find another living leader
+			return &raftpb.Message{
+				Type:    raftpb.MsgApp,
+				To:      m.From,
+				From:    progress.TermHolder,
+				Term:    progress.Term,
+				LogTerm: progress.LogTerm,
+				Index:   progress.LogIndex,
+				Entries: progress.Entries,
+			}
+		}
+
+		if progress.LogIndex <= m.Index && progress.LogTerm <= m.Term {
+			return grantVote(m)
+		} else {
+			// todo: check if legal
+			// though our term is higher, our progress is not
+			return &raftpb.Message{
+				Type:    raftpb.MsgVoteResp,
+				To:      m.From,
+				From:    m.To,
+				Term:    m.Term,
+				Index:   progress.LogIndex,
+				LogTerm: progress.LogTerm,
+				Reject:  true,
+			}
+		}
+
+	*/
+	return nil
+}
+
+func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Message) []*raftpb.Message {
+	an := itp.an[toRack]
+
+	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
+		return nil
+	}
+
+	zeroUpdate, votes := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
+	an.AnalyzeAndRemoveOffers()
+
+	// if there is no competitive challenger, move on
+	if zeroUpdate || hasNoCompetitor(an) {
+		resp := handleAppendEntries(m, an)
+		return []*raftpb.Message{resp}
+	}
+
+	// otherwise, leadership is overthrown
+
+	// scenario I: no pending votes
+	if len(votes) == 0 {
+		pg := an.Progress()
+		switch {
+		case pg.NoProgress:
+			pg = an.UncheckedProgress()
+			resp := newAppRespReject(m.From, m.To, pg.Term, m.Index, m.Index+uint64(len(m.Entries)))
+			return []*raftpb.Message{resp}
+		case pg.Term == m.Term:
+			// our leadership
+		}
+	}
+
+	/*
+		if progress.NoProgress {
+			return handleAppendEntries(m, an)
+		}
+
+		if progress.Term > m.Term {
+			// todo: check if legal
+			// we find another living leader
+			return &raftpb.Message{
+				Type:    raftpb.MsgApp,
+				To:      m.From,
+				From:    progress.TermHolder,
+				Term:    progress.Term,
+				LogTerm: progress.LogTerm,
+				Index:   progress.LogIndex,
+				Entries: progress.Entries,
+			}
+		}
+
+		return handleAppendEntries(m, an)
+	*/
+	return nil
 }
 
 func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an *MimicRaftKernelAnalyzer) error {
@@ -242,17 +230,21 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 		return err
 	}
 
-	switch m.Type {
-	case raftpb.MsgVote:
-		an.OfferLocalVote(m.Term, m.From)
-	case raftpb.MsgApp, raftpb.MsgHeartbeat:
-		an.OfferLocalEntries(m.Term, m.Commit, m.LogTerm, m.Entries)
+	if an != nil {
+		switch m.Type {
+		case raftpb.MsgVote:
+			an.GetVoteAnalyzer().OfferLocalVote(m.Term, m.From, m.Index, m.LogTerm)
+		case raftpb.MsgApp, raftpb.MsgHeartbeat:
+			an.OfferLocalEntries(m.Term, itp.f2p[targetFile], m.Commit, m.LogTerm, m.Entries)
+		}
 	}
 
 	return nil
 }
 
-func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, *raftpb.Message) {
+//getUpdatesFromOtherFiles get updates from file (except exceptFile) on rack and submit them to analyzer.
+// If there is no update, return false. If there exists some pending votes, return them.
+func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, []*raftpb.Message) {
 	var count = len(itp.files) - 1
 	var c = make(chan *Update, count)
 	for _, file := range itp.files {
@@ -262,7 +254,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 	}
 
 	var zeroDelta = true
-	var vote *raftpb.Message = nil
+	var vote []*raftpb.Message
 
 	for update := range c {
 		if update.Err != nil {
@@ -280,14 +272,23 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 				zap.Uint64("term", update.Term),
 				zap.Uint64("committed", update.Commit),
 				zap.Bool("has-append", !update.Collected.IsNotInitialized()),
-				zap.Bool("has-vote", update.VoteMsg != nil),
+				zap.Bool("has-vote", update.EverVote != nil),
 			)
 
-			an.OfferRemoteEntries(update.Term, update.Commit, update.Collected)
+			if an != nil {
+				an.OfferRemoteEntries(update.Term, itp.f2p[update.SourceFile], update.Commit, update.Collected)
+			}
 
-			if update.VoteMsg != nil {
-				if vote == nil || vote.Term < update.VoteMsg.Term {
-					vote = update.VoteMsg
+			if update.EverVote != nil {
+				if an != nil {
+					// if ever involve voting, offer it to analyzer
+					ev := update.EverVote
+					an.GetVoteAnalyzer().OfferRemoteVote(ev.Term, ev.From, ev.Index, ev.LogTerm, update.VotePend)
+				}
+
+				// only pending voting will be submit to the caller
+				if update.VotePend {
+					vote = append(vote, update.EverVote)
 				}
 			}
 		}
@@ -301,6 +302,14 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 	return zeroDelta, vote
 }
 
+func hb2app(m *raftpb.Message) *raftpb.Message {
+	return nil
+}
+
+func appRes2hbRes(m []*raftpb.Message) []*raftpb.Message {
+	return nil
+}
+
 func grantVote(vote *raftpb.Message) *raftpb.Message {
 	return &raftpb.Message{
 		Type:   raftpb.MsgVoteResp,
@@ -312,6 +321,8 @@ func grantVote(vote *raftpb.Message) *raftpb.Message {
 }
 
 func handleAppendEntries(app *raftpb.Message, an *MimicRaftKernelAnalyzer) *raftpb.Message {
+	// mimic the procedure of handleAppendEntries in raft kernel
+
 	committed := an.Committed()
 
 	if app.Index < committed {
@@ -320,7 +331,7 @@ func handleAppendEntries(app *raftpb.Message, an *MimicRaftKernelAnalyzer) *raft
 
 	lastNewIndex := app.Index + uint64(len(app.Entries))
 
-	switch an.MatchIndex(app.Index, app.LogTerm) {
+	switch an.GetSubLocator(true).MatchIndex(app.Index, app.LogTerm) {
 	case collector.UNDERFLOW:
 		panic("underflow occurs when making response")
 	case collector.PREV, collector.WITHIN:
@@ -328,6 +339,15 @@ func handleAppendEntries(app *raftpb.Message, an *MimicRaftKernelAnalyzer) *raft
 	default:
 		return newAppRespReject(app.From, app.To, an.Term(), app.Index, lastNewIndex)
 	}
+}
+
+func hasNoCompetitor(an *MimicRaftKernelAnalyzer) bool {
+	return true
+}
+
+func redirectAppendEntries(pg *RackProgressDescriptor) *raftpb.Message {
+
+	return nil
 }
 
 func newVoteRespAccept(voteSender, voteResponder, term, index uint64) *raftpb.Message {
