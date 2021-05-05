@@ -2,7 +2,6 @@ package draft
 
 import (
 	"go.etcd.io/etcd/draft/collector"
-	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 	"sort"
 )
@@ -35,10 +34,21 @@ func newProgress(term, tHolder, commit, logTerm, logIndex uint64, ent []raftpb.E
 	}
 }
 
+type VoteAnalyzer struct {
+	//
+}
+
+func (an *VoteAnalyzer) OfferLocalVote(oTerm, oId, lastLogIndex, lastLogTerm uint64) {
+
+}
+
+func (an *VoteAnalyzer) OfferRemoteVote(oTerm, oId, lastLogIndex, lastLogTerm uint64, pending bool) {
+
+}
+
 type MimicRaftKernelAnalyzer struct {
-	term    uint64
-	tHolder uint64
-	commit  uint64
+	term   uint64
+	commit uint64
 
 	compacted     *collector.MimicRaftKernelBriefCollector
 	beforeCompact *collector.MimicRaftKernelCollector
@@ -51,7 +61,12 @@ type MimicRaftKernelAnalyzer struct {
 	beforeFingerprint map[*collector.EntryFragment]uint64
 	beforeCommitted   uint64
 	beforeTerm        uint64
-	beforeTHolder     uint64
+
+	vote *VoteAnalyzer
+}
+
+func (an *MimicRaftKernelAnalyzer) GetVoteAnalyzer() *VoteAnalyzer {
+	return an.vote
 }
 
 func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prevLogTerm uint64, ent []raftpb.Entry) {
@@ -62,12 +77,8 @@ func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prev
 	an.analyzed = false
 
 	// update term
-	switch {
-	case oTerm < an.beforeTerm:
-	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
-	default:
+	if oTerm > an.beforeTerm {
 		an.beforeTerm = oTerm
-		an.beforeTHolder = oId
 	}
 
 	if len(ent) == 0 {
@@ -101,12 +112,8 @@ func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint
 	an.analyzed = false
 
 	// update term
-	switch {
-	case oTerm < an.beforeTerm:
-	case oTerm == an.beforeTHolder && an.beforeTHolder != raft.None:
-	default:
+	if oTerm > an.beforeTerm {
 		an.beforeTerm = oTerm
-		an.beforeTHolder = oId
 	}
 
 	if ok, fs := efc.FetchFragmentsWithStartIndex(an.commit + 1); !efc.IsNotInitialized() && ok {
@@ -122,9 +129,9 @@ func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint
 
 func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
 	// whenever happens, update term first
+	// todo: what about the same term
 	if an.beforeTerm > an.term {
 		an.term = an.beforeTerm
-		an.tHolder = an.beforeTHolder
 	}
 
 	if an.analyzed {
@@ -163,14 +170,6 @@ func (an *MimicRaftKernelAnalyzer) Term() uint64 {
 	return an.term
 }
 
-func (an *MimicRaftKernelAnalyzer) TermAndTHolder() (uint64, uint64) {
-	if !an.analyzed {
-		panic("some fragments are still no analyzed")
-	}
-
-	return an.term, an.tHolder
-}
-
 func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
 	if !an.analyzed {
 		panic("some fragments are still no analyzed")
@@ -181,6 +180,10 @@ func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
 	}
 
 	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
+
+	if an.compacted.IsEmpty() {
+		return newProgress(an.bcCTerm, an.bcCTHolder, an.commit, logTerm, logIndex, ent)
+	}
 
 	switch an.compacted.MatchIndex(logIndex, logTerm) {
 	case collector.UNDERFLOW:
@@ -243,108 +246,16 @@ func (an *MimicRaftKernelAnalyzer) CompactBefore(index uint64) collector.Locatio
 	return location
 }
 
-func (an *MimicRaftKernelAnalyzer) MatchIndexInCompact(index, term uint64) (bool, collector.Location) {
-	if an.compacted.IsEmpty() {
-		return false, collector.OVERFLOW
+func (an *MimicRaftKernelAnalyzer) GetSubLocator(compacted bool) collector.Locator {
+	if !an.analyzed {
+		panic("locator is unreachable before analyze finishes")
 	}
 
-	return true, an.compacted.MatchIndex(index, term)
-}
-
-func (an *MimicRaftKernelAnalyzer) MatchIndex(index, term uint64) collector.Location {
-	if an.IsEmpty() {
-		panic("unable to access empty records")
+	if compacted {
+		return an.compacted
+	} else {
+		return an.beforeCompact
 	}
-
-	if an.compacted.IsEmpty() {
-		return an.beforeCompact.MatchIndex(index, term)
-	}
-
-	if an.beforeCompact.IsEmpty() {
-		return an.compacted.MatchIndex(index, term)
-	}
-
-	res := an.compacted.MatchIndex(index, term)
-	switch res {
-	case collector.UNDERFLOW:
-		panic("underflow occurs when matching index")
-	case collector.OVERFLOW:
-		res = an.beforeCompact.MatchIndex(index, term)
-		if res == collector.UNDERFLOW {
-			panic("there is a gap between compacted and beforeCompact")
-		}
-		return res
-	default:
-		return res
-	}
-}
-
-func (an *MimicRaftKernelAnalyzer) LocateIndex(index uint64) (collector.Location, uint64) {
-	if an.IsEmpty() {
-		panic("unable to access empty records")
-	}
-
-	if an.compacted.IsEmpty() {
-		return an.beforeCompact.LocateIndex(index)
-	}
-
-	if an.beforeCompact.IsEmpty() {
-		return an.compacted.LocateIndex(index)
-	}
-
-	res, term := an.compacted.LocateIndex(index)
-	switch res {
-	case collector.UNDERFLOW:
-		panic("underflow occurs when matching index")
-	case collector.OVERFLOW:
-		res, term = an.beforeCompact.LocateIndex(index)
-		if res == collector.UNDERFLOW {
-			panic("there is a gap between compacted and beforeCompact")
-		}
-		return res, term
-	default:
-		return res, term
-	}
-}
-
-func (an *MimicRaftKernelAnalyzer) PrevLogTerm() uint64 {
-	if an.IsEmpty() {
-		panic("unable to access empty records")
-	}
-
-	if an.compacted.IsEmpty() {
-		return an.beforeCompact.PrevLogTerm()
-	}
-
-	return an.compacted.PrevLogTerm()
-}
-
-func (an *MimicRaftKernelAnalyzer) FirstIndex() uint64 {
-	if an.IsEmpty() {
-		panic("unable to access empty records")
-	}
-
-	if an.compacted.IsEmpty() {
-		return an.beforeCompact.FirstIndex()
-	}
-
-	return an.compacted.FirstIndex()
-}
-
-func (an *MimicRaftKernelAnalyzer) LastIndex() uint64 {
-	if an.IsEmpty() {
-		panic("unable to access empty records")
-	}
-
-	if an.beforeCompact.IsEmpty() {
-		return an.compacted.LastIndex()
-	}
-
-	return an.beforeCompact.LastIndex()
-}
-
-func (an *MimicRaftKernelAnalyzer) IsEmpty() bool {
-	return an.compacted.IsEmpty() && an.beforeCompact.IsEmpty()
 }
 
 func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
@@ -354,14 +265,24 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
 		case collector.UNDERFLOW:
 			panic("an underflow occurs in compacted analysis")
 		case collector.WITHIN, collector.PREV, collector.OVERFLOW:
-			// matched in compacted analysis, resize the
+			// matched in compacted analysis
 			ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
 			switch {
 			case ok:
+				an.bcCTerm = f.CTerm
 				an.bcCTHolder = an.beforeFingerprint[f]
 			case !ok && loc == collector.UNDERFLOW:
 				// refresh beforeCompact with this fragment
 				an.beforeCompact.Refresh()
+				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
+					an.bcCTerm = f.CTerm
+					an.bcCTHolder = an.beforeFingerprint[f]
+				}
+			}
+		case collector.CONFLICT:
+			// mismatched in compact analysis, might matched in beforeCompact
+			if !an.beforeCompact.IsEmpty() &&
+				an.beforeCompact.MatchIndex(f.LogIndex, f.LogTerm) == collector.WITHIN {
 				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
 					an.bcCTerm = f.CTerm
 					an.bcCTHolder = an.beforeFingerprint[f]
@@ -399,6 +320,7 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
 		ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
 		switch {
 		case ok:
+			an.bcCTerm = f.CTerm
 			an.bcCTHolder = an.beforeFingerprint[f]
 		case !ok && loc == collector.UNDERFLOW:
 			// refresh beforeCompact with this fragment
