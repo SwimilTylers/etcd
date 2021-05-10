@@ -57,7 +57,7 @@ func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) []*raftpb.Message {
 func (itp *OneToOneInterpreter) drSync() []*raftpb.Message {
 	// during drSync, we do not involve voting
 	an := itp.an[itp.syncRack]
-	if noUpdates, _ := itp.getUpdatesFromOtherFiles(itp.syncRack, "", an); !noUpdates {
+	if itp.getUpdatesFromOtherFiles(itp.syncRack, "", an) {
 		an.AnalyzeAndRemoveOffers()
 		if pg := an.Progress(); !pg.NoProgress {
 			app := redirectAppendEntries(pg)
@@ -170,52 +170,47 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 		return nil
 	}
 
-	zeroUpdate, votes := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
-	an.AnalyzeAndRemoveOffers()
-
-	// if there is no competitive challenger, move on
-	if zeroUpdate || hasNoCompetitor(an) {
-		resp := handleAppendEntries(m, an)
+	if !itp.getUpdatesFromOtherFiles(toRack, toFile, an) {
+		// normal case
+		an.AnalyzeAndRemoveOffers()
+		an.Compact()
+		resp := handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
 		return []*raftpb.Message{resp}
 	}
 
-	// otherwise, leadership is overthrown
+	/*
+	 prepare for response to AppendEntries
+	*/
 
-	// scenario I: no pending votes
-	if len(votes) == 0 {
-		pg := an.Progress()
-		switch {
-		case pg.NoProgress:
-			pg = an.UncheckedProgress()
-			resp := newAppRespReject(m.From, m.To, pg.Term, m.Index, m.Index+uint64(len(m.Entries)))
-			return []*raftpb.Message{resp}
-		case pg.Term == m.Term:
-			// our leadership
+	an.AnalyzeAndRemoveOffers()
+	pg := an.Progress()
+	var aResp *raftpb.Message = nil
+
+	switch {
+	case pg.NoProgress:
+		// the progress is lagging, request for resent
+		aResp = handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
+	case pg.Term == m.Term:
+		if pg.TermHolder != m.From {
+			panic("an inconsistency occurs when interpreter checks term and its holder")
 		}
+
+		// our leadership might not be overthrown, safely compact
+		an.Compact()
+		aResp = handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
+	default:
+		// our leadership
+
+		// we should not compact due to further dsync
+
+		aResp = handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(false))
 	}
 
 	/*
-		if progress.NoProgress {
-			return handleAppendEntries(m, an)
-		}
-
-		if progress.Term > m.Term {
-			// todo: check if legal
-			// we find another living leader
-			return &raftpb.Message{
-				Type:    raftpb.MsgApp,
-				To:      m.From,
-				From:    progress.TermHolder,
-				Term:    progress.Term,
-				LogTerm: progress.LogTerm,
-				Index:   progress.LogIndex,
-				Entries: progress.Entries,
-			}
-		}
-
-		return handleAppendEntries(m, an)
+	 prepare for redirecting votes
 	*/
-	return nil
+
+	return []*raftpb.Message{aResp}
 }
 
 func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an *MimicRaftKernelAnalyzer) error {
@@ -243,8 +238,8 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 }
 
 //getUpdatesFromOtherFiles get updates from file (except exceptFile) on rack and submit them to analyzer.
-// If there is no update, return false. If there exists some pending votes, return them.
-func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, []*raftpb.Message) {
+// If there is no update, return false.
+func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) bool {
 	var count = len(itp.files) - 1
 	var c = make(chan *Update, count)
 	for _, file := range itp.files {
@@ -253,7 +248,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 		}
 	}
 
-	var zeroDelta = true
+	var updated = false
 	var vote []*raftpb.Message
 
 	for update := range c {
@@ -265,7 +260,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 				zap.Error(update.Err),
 			)
 		} else if !update.ZeroDelta {
-			zeroDelta = false
+			updated = true
 			itp.lg.Info("receive an update from other file",
 				zap.String("rack", rack),
 				zap.String("file", update.SourceFile),
@@ -299,7 +294,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 		}
 	}
 
-	return zeroDelta, vote
+	return updated
 }
 
 func hb2app(m *raftpb.Message) *raftpb.Message {
@@ -320,24 +315,22 @@ func grantVote(vote *raftpb.Message) *raftpb.Message {
 	}
 }
 
-func handleAppendEntries(app *raftpb.Message, an *MimicRaftKernelAnalyzer) *raftpb.Message {
+func handleAppendEntries(app *raftpb.Message, committed, term uint64, locator collector.Locator) *raftpb.Message {
 	// mimic the procedure of handleAppendEntries in raft kernel
 
-	committed := an.Committed()
-
 	if app.Index < committed {
-		return newAppRespAccept(app.From, app.To, an.Term(), committed)
+		return newAppRespAccept(app.From, app.To, term, committed)
 	}
 
 	lastNewIndex := app.Index + uint64(len(app.Entries))
 
-	switch an.GetSubLocator(true).MatchIndex(app.Index, app.LogTerm) {
+	switch locator.MatchIndex(app.Index, app.LogTerm) {
 	case collector.UNDERFLOW:
 		panic("underflow occurs when making response")
 	case collector.PREV, collector.WITHIN:
-		return newAppRespAccept(app.From, app.To, an.Term(), lastNewIndex)
+		return newAppRespAccept(app.From, app.To, term, lastNewIndex)
 	default:
-		return newAppRespReject(app.From, app.To, an.Term(), app.Index, lastNewIndex)
+		return newAppRespReject(app.From, app.To, term, app.Index, lastNewIndex)
 	}
 }
 
