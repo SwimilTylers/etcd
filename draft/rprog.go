@@ -34,18 +34,6 @@ func newProgress(term, tHolder, commit, logTerm, logIndex uint64, ent []raftpb.E
 	}
 }
 
-type VoteAnalyzer struct {
-	//
-}
-
-func (an *VoteAnalyzer) OfferLocalVote(oTerm, oId, lastLogIndex, lastLogTerm uint64) {
-
-}
-
-func (an *VoteAnalyzer) OfferRemoteVote(oTerm, oId, lastLogIndex, lastLogTerm uint64, pending bool) {
-
-}
-
 type MimicRaftKernelAnalyzer struct {
 	term   uint64
 	commit uint64
@@ -61,12 +49,6 @@ type MimicRaftKernelAnalyzer struct {
 	beforeFingerprint map[*collector.EntryFragment]uint64
 	beforeCommitted   uint64
 	beforeTerm        uint64
-
-	vote *VoteAnalyzer
-}
-
-func (an *MimicRaftKernelAnalyzer) GetVoteAnalyzer() *VoteAnalyzer {
-	return an.vote
 }
 
 func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prevLogTerm uint64, ent []raftpb.Entry) {
@@ -79,6 +61,11 @@ func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prev
 	// update term
 	if oTerm > an.beforeTerm {
 		an.beforeTerm = oTerm
+	}
+
+	// update committed
+	if an.beforeCommitted < committed {
+		an.beforeCommitted = committed
 	}
 
 	if len(ent) == 0 {
@@ -99,9 +86,6 @@ func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prev
 
 	an.beforeAnalysis = append(an.beforeAnalysis, f)
 	an.beforeFingerprint[f] = oId
-	if an.beforeCommitted < committed {
-		an.beforeCommitted = committed
-	}
 }
 
 func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint64, efc collector.EntryFragmentCollector) {
@@ -116,13 +100,15 @@ func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint
 		an.beforeTerm = oTerm
 	}
 
+	// update committed
+	if an.beforeCommitted < committed {
+		an.beforeCommitted = committed
+	}
+
 	if ok, fs := efc.FetchFragmentsWithStartIndex(an.commit + 1); !efc.IsNotInitialized() && ok {
 		an.beforeAnalysis = append(an.beforeAnalysis, fs...)
 		for _, f := range fs {
 			an.beforeFingerprint[f] = oId
-		}
-		if an.beforeCommitted < committed {
-			an.beforeCommitted = committed
 		}
 	}
 }
@@ -244,6 +230,15 @@ func (an *MimicRaftKernelAnalyzer) CompactBefore(index uint64) collector.Locatio
 	}
 
 	return location
+}
+
+func (an *MimicRaftKernelAnalyzer) TrySetTerm(term uint64) bool {
+	if an.term > term {
+		return false
+	}
+
+	an.term = term
+	return true
 }
 
 func (an *MimicRaftKernelAnalyzer) GetSubLocator(compacted bool) collector.Locator {
