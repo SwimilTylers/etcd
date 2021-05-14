@@ -58,6 +58,7 @@ enum MessageType {
 	MsgSaucrSheltering = 42;
 	MsgSaucrShelteringResp = 43;
 	MsgDRSync					 = 46;
+	MsgDRSyncResp			 = 47;
 }
 
 message Message {
