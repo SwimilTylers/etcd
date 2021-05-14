@@ -75,7 +75,7 @@ func TestAppendUpdate(t *testing.T) {
 						if other == from {
 							u := pp.GetUpdate(r, f)
 
-							if u.EverVote != nil {
+							if u.LastVote != nil {
 								t.Fatalf("append=%v, rack=%s, file=%s: should receive no vote", from, r, f)
 							}
 
@@ -133,7 +133,7 @@ func TestVoteWrite(t *testing.T) {
 
 					r, f := ft2rf(from, to)
 					if from == host {
-						if !reflect.DeepEqual(votes[to], ppo.GetUpdate(r, f).EverVote) {
+						if !reflect.DeepEqual(votes[to], ppo.GetUpdate(r, f).LastVote) {
 							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should receive vote", other, from, r, f)
 						}
 					} else {
