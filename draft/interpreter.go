@@ -6,6 +6,14 @@ import (
 	"go.uber.org/zap"
 )
 
+type DrSyncType string
+
+const (
+	DrSyncPending DrSyncType = "DrSyncPending"
+	DrSyncEntries DrSyncType = "DrSyncEntries"
+	DrSyncAdvance DrSyncType = "DrSyncAdvance"
+)
+
 type Interpreter interface {
 	//IsSupported checks if translation service is available to this Message.
 	IsSupported(m *raftpb.Message) bool
@@ -30,12 +38,14 @@ type OneToOneInterpreter struct {
 }
 
 func (itp *OneToOneInterpreter) IsSupported(m *raftpb.Message) bool {
-	return m.Type == raftpb.MsgVote || m.Type == raftpb.MsgApp || m.Type == raftpb.MsgHeartbeat || m.Type == raftpb.MsgDRSync
+	return m.Type == raftpb.MsgVote || m.Type == raftpb.MsgPreVote ||
+		m.Type == raftpb.MsgApp || m.Type == raftpb.MsgHeartbeat ||
+		m.Type == raftpb.MsgDRSync
 }
 
-func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) []*raftpb.Message {
+func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
 	switch m.Type {
-	case raftpb.MsgVote:
+	case raftpb.MsgPreVote, raftpb.MsgVote:
 		if ok, r, f := itp.Locate(m); ok {
 			return itp.interpretVote(r, f, m)
 		}
@@ -43,29 +53,8 @@ func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) []*raftpb.Message {
 		if ok, r, f := itp.Locate(m); ok {
 			return itp.interpretApp(r, f, m)
 		}
-	case raftpb.MsgHeartbeat:
-		if ok, r, f := itp.Locate(m); ok {
-			return appRes2hbRes(itp.interpretApp(r, f, hb2app(m)))
-		}
 	case raftpb.MsgDRSync:
-		return itp.drSync()
-	}
-
-	return nil
-}
-
-func (itp *OneToOneInterpreter) drSync() []*raftpb.Message {
-	// during drSync, we do not involve voting
-	an := itp.an[itp.syncRack]
-	if itp.getUpdatesFromOtherFiles(itp.syncRack, "", an) {
-		an.AnalyzeAndRemoveOffers()
-		if pg := an.Progress(); !pg.NoProgress {
-			app := redirectAppendEntries(pg)
-			// the prevLogTerm and prevLogIndex of an.beforeCompact
-			// match the record in an.compacted, safe to compact
-			an.Compact()
-			return []*raftpb.Message{app}
-		}
+		return itp.drSync(m)
 	}
 
 	return nil
@@ -87,130 +76,133 @@ func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, t
 	return true, toRack, toFile
 }
 
-func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.Message) []*raftpb.Message {
-	an := itp.an[toRack]
+func (itp *OneToOneInterpreter) drSync(m *raftpb.Message) *raftpb.Message {
+	// during drSync, we do not involve voting
+	an := itp.an[itp.syncRack]
 
-	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
-		return nil
+	var u bool
+	var votes []*raftpb.Message
+
+	if u, votes = itp.getUpdatesFromOtherFiles(itp.syncRack, "", an); !u {
+		// there is no update in racks, check out residual information in analyzer
+		pg := an.Progress()
+
+		switch {
+		case !pg.NoProgress:
+			an.Compact()
+			return newDrSyncRespEntries(pg.Term, pg.TermHolder, pg.Commit, pg.LogIndex, pg.LogTerm, pg.Entries)
+		case an.Term() > m.Term, an.Committed() > m.Commit:
+			return newDrSyncRespAdvance(an.Term(), an.Committed())
+		default:
+			return nil
+		}
 	}
-
-	// zeroUpdate, vote := itp.getUpdatesFromOtherFiles(toRack, toFile, an)
-
-	/*
-		if zeroUpdate {
-			return grantVote(m)
-		}
-
-		if vote != nil {
-			if vote.Term > m.Term {
-				// todo: check if legal
-				return &raftpb.Message{
-					Type:   raftpb.MsgVoteResp,
-					To:     m.From,
-					From:   vote.From,
-					Term:   vote.Term,
-					Reject: true,
-				}
-			} else if vote.Term == m.Term {
-				// todo: check if legal
-				return &raftpb.Message{
-					Type:   raftpb.MsgVoteResp,
-					To:     m.From,
-					From:   m.To,
-					Term:   m.Term,
-					Reject: true,
-				}
-			}
-		}
-
-		progress := an.Progress()
-
-		if progress.NoProgress {
-			return grantVote(m)
-		}
-
-		if progress.Term >= m.Term {
-			// todo: check if legal
-			// we find another living leader
-			return &raftpb.Message{
-				Type:    raftpb.MsgApp,
-				To:      m.From,
-				From:    progress.TermHolder,
-				Term:    progress.Term,
-				LogTerm: progress.LogTerm,
-				Index:   progress.LogIndex,
-				Entries: progress.Entries,
-			}
-		}
-
-		if progress.LogIndex <= m.Index && progress.LogTerm <= m.Term {
-			return grantVote(m)
-		} else {
-			// todo: check if legal
-			// though our term is higher, our progress is not
-			return &raftpb.Message{
-				Type:    raftpb.MsgVoteResp,
-				To:      m.From,
-				From:    m.To,
-				Term:    m.Term,
-				Index:   progress.LogIndex,
-				LogTerm: progress.LogTerm,
-				Reject:  true,
-			}
-		}
-
-	*/
-	return nil
-}
-
-func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Message) []*raftpb.Message {
-	an := itp.an[toRack]
-
-	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
-		return nil
-	}
-
-	if !itp.getUpdatesFromOtherFiles(toRack, toFile, an) {
-		// normal case
-		an.AnalyzeAndRemoveOffers()
-		an.Compact()
-		resp := handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
-		return []*raftpb.Message{resp}
-	}
-
-	/*
-	 prepare for response to AppendEntries
-	*/
 
 	an.AnalyzeAndRemoveOffers()
-	pg := an.Progress()
-	var aResp *raftpb.Message = nil
-
-	switch {
-	case pg.NoProgress:
-		// the progress is lagging, request for resent
-		aResp = handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
-	case pg.Term == m.Term:
-		if pg.TermHolder != m.From {
-			panic("an inconsistency occurs when interpreter checks term and its holder")
-		}
-
-		// our leadership might not be overthrown, safely compact
-		an.Compact()
-		aResp = handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
-	default:
-		// our leadership
-
-		// we should not compact due to further dsync
-
-		aResp = handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(false))
+	an.TrySetTerm(m.Term)
+	for _, v := range votes {
+		an.TrySetTerm(v.Term)
 	}
 
-	/*
-	 prepare for redirecting votes
-	*/
+	pg := an.Progress()
 
-	return []*raftpb.Message{aResp}
+	switch {
+	case !pg.NoProgress:
+		an.Compact()
+		return newDrSyncRespEntries(pg.Term, pg.TermHolder, pg.Commit, pg.LogIndex, pg.LogTerm, pg.Entries)
+	case an.Term() > m.Term, an.Committed() > m.Commit:
+		return newDrSyncRespAdvance(an.Term(), an.Committed())
+	default:
+		return newDrSyncRespPending()
+	}
+}
+
+func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
+	an := itp.an[toRack]
+
+	if an.Term() > m.Term {
+		// a staled message, drop it
+		itp.lg.Warn("receive a staled message from raft kernel",
+			zap.Uint64("msg-term", m.Term),
+			zap.Uint64("itp-term", an.Term()),
+		)
+		return nil
+	}
+
+	if err := itp.writeToTargetFile(m, toRack, toFile, nil); err != nil {
+		itp.lg.Error("abort interpretation due to a write error", zap.Error(err))
+		return nil
+	}
+
+	var u bool
+	var votes []*raftpb.Message
+
+	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
+		// normal case
+		return handleRequestVote(m, an.Term(), an.GetSubLocator(true))
+	}
+
+	an.AnalyzeAndRemoveOffers()
+	an.TrySetTerm(m.Term)
+	for _, v := range votes {
+		an.TrySetTerm(v.Term)
+	}
+
+	var locator = an.GetSubLocator(!an.Progress().NoProgress)
+	return handleRequestVote(m, an.Term(), locator)
+}
+
+func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
+	an := itp.an[toRack]
+
+	if an.Term() > m.Term {
+		// a staled message, drop it
+		itp.lg.Warn("receive a staled message from raft kernel",
+			zap.Uint64("msg-term", m.Term),
+			zap.Uint64("itp-term", an.Term()),
+		)
+		return nil
+	}
+
+	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
+		itp.lg.Error("abort interpretation due to a write error", zap.Error(err))
+		return nil
+	}
+
+	var u bool
+	var votes []*raftpb.Message
+
+	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
+		// normal case, merge local offer
+		an.AnalyzeAndRemoveOffers()
+		an.Compact()
+		return handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
+	}
+
+	an.AnalyzeAndRemoveOffers()
+	an.TrySetTerm(m.Term)
+	for _, v := range votes {
+		an.TrySetTerm(v.Term)
+	}
+
+	pg := an.Progress()
+
+	switch {
+	case pg.NoProgress, pg.Term == m.Term:
+		// the progress is not overwritten
+		//	1. the rack if lagging, permission for resent
+		//  2. the rack receive staled entries from other processors, safe to proceed
+		an.Compact()
+		return handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
+	default:
+		// the progress is overwritten, locate our position
+		var locator = an.GetSubLocator(true)
+		if locator.LastIndex() < m.Index {
+			locator = an.GetSubLocator(false)
+		}
+
+		return handleAppendEntries(m, an.Committed(), an.Term(), locator)
+	}
 }
 
 func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an *MimicRaftKernelAnalyzer) error {
@@ -226,20 +218,13 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 	}
 
 	if an != nil {
-		switch m.Type {
-		case raftpb.MsgVote:
-			an.GetVoteAnalyzer().OfferLocalVote(m.Term, m.From, m.Index, m.LogTerm)
-		case raftpb.MsgApp, raftpb.MsgHeartbeat:
-			an.OfferLocalEntries(m.Term, itp.f2p[targetFile], m.Commit, m.LogTerm, m.Entries)
-		}
+		an.OfferLocalEntries(m.Term, itp.f2p[targetFile], m.Commit, m.LogTerm, m.Entries)
 	}
 
 	return nil
 }
 
-//getUpdatesFromOtherFiles get updates from file (except exceptFile) on rack and submit them to analyzer.
-// If there is no update, return false.
-func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) bool {
+func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, []*raftpb.Message) {
 	var count = len(itp.files) - 1
 	var c = make(chan *Update, count)
 	for _, file := range itp.files {
@@ -251,7 +236,9 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 	var updated = false
 	var vote []*raftpb.Message
 
-	for update := range c {
+	for i := 0; i < count; i++ {
+		update := <-c
+
 		if update.Err != nil {
 			itp.lg.Warn("error occurs when perform draft primitives",
 				zap.String("op", "get-update"),
@@ -267,52 +254,23 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 				zap.Uint64("term", update.Term),
 				zap.Uint64("committed", update.Commit),
 				zap.Bool("has-append", !update.Collected.IsNotInitialized()),
-				zap.Bool("has-vote", update.EverVote != nil),
+				zap.Bool("has-vote", update.LastVote != nil),
 			)
 
 			if an != nil {
 				an.OfferRemoteEntries(update.Term, itp.f2p[update.SourceFile], update.Commit, update.Collected)
 			}
 
-			if update.EverVote != nil {
-				if an != nil {
-					// if ever involve voting, offer it to analyzer
-					ev := update.EverVote
-					an.GetVoteAnalyzer().OfferRemoteVote(ev.Term, ev.From, ev.Index, ev.LogTerm, update.VotePend)
-				}
-
+			if update.LastVote != nil {
 				// only pending voting will be submit to the caller
 				if update.VotePend {
-					vote = append(vote, update.EverVote)
+					vote = append(vote, update.LastVote)
 				}
 			}
 		}
-
-		count--
-		if count == 0 {
-			break
-		}
 	}
 
-	return updated
-}
-
-func hb2app(m *raftpb.Message) *raftpb.Message {
-	return nil
-}
-
-func appRes2hbRes(m []*raftpb.Message) []*raftpb.Message {
-	return nil
-}
-
-func grantVote(vote *raftpb.Message) *raftpb.Message {
-	return &raftpb.Message{
-		Type:   raftpb.MsgVoteResp,
-		To:     vote.From,
-		From:   vote.To,
-		Term:   vote.Term,
-		Reject: false,
-	}
+	return updated, vote
 }
 
 func handleAppendEntries(app *raftpb.Message, committed, term uint64, locator collector.Locator) *raftpb.Message {
@@ -334,21 +292,63 @@ func handleAppendEntries(app *raftpb.Message, committed, term uint64, locator co
 	}
 }
 
-func hasNoCompetitor(an *MimicRaftKernelAnalyzer) bool {
-	return true
+func handleRequestVote(vote *raftpb.Message, term uint64, locator collector.Locator) *raftpb.Message {
+	preVote := vote.Type == raftpb.MsgPreVote
+
+	// if the rack has the same term with our vote, reject our vote immediately in case of parallel vote-accept
+	if vote.Term <= term {
+		return newVoteRespReject(preVote, vote.From, vote.To, term)
+	}
+
+	if isUpdateTo(vote, locator) {
+		return newVoteRespAccept(preVote, vote.From, vote.To, term)
+	} else {
+		return newVoteRespReject(preVote, vote.From, vote.To, term)
+	}
 }
 
-func redirectAppendEntries(pg *RackProgressDescriptor) *raftpb.Message {
+func isUpdateTo(m *raftpb.Message, locator collector.Locator) bool {
+	lastIndex := locator.LastIndex()
+	_, lastTerm := locator.LocateIndex(lastIndex)
 
-	return nil
+	if m.LogTerm > lastTerm || (m.LogTerm == lastTerm && m.Index >= lastIndex) {
+		return true
+	} else {
+		return false
+	}
 }
 
-func newVoteRespAccept(voteSender, voteResponder, term, index uint64) *raftpb.Message {
-	return nil
+func hasProgress(m *raftpb.Message, committed uint64, pg *RackProgressDescriptor) bool {
+	return m.Commit < committed || !pg.NoProgress
 }
 
-func newVoteRespReject(voteSender, voteResponder, term, index, rejectHint uint64) *raftpb.Message {
-	return nil
+func newVoteRespAccept(preVote bool, voteSender, voteResponder, term uint64) *raftpb.Message {
+	var rType = raftpb.MsgVoteResp
+	if preVote {
+		rType = raftpb.MsgPreVoteResp
+	}
+
+	return &raftpb.Message{
+		Type: rType,
+		To:   voteSender,
+		From: voteResponder,
+		Term: term,
+	}
+}
+
+func newVoteRespReject(preVote bool, voteSender, voteResponder, term uint64) *raftpb.Message {
+	var rType = raftpb.MsgVoteResp
+	if preVote {
+		rType = raftpb.MsgPreVoteResp
+	}
+
+	return &raftpb.Message{
+		Type:   rType,
+		To:     voteSender,
+		From:   voteResponder,
+		Term:   term,
+		Reject: true,
+	}
 }
 
 func newAppRespAccept(appSender, appResponder, term, index uint64) *raftpb.Message {
@@ -370,5 +370,34 @@ func newAppRespReject(appSender, appResponder, term, index, rejectHint uint64) *
 		Index:      index,
 		Reject:     true,
 		RejectHint: rejectHint,
+	}
+}
+
+func newDrSyncRespPending() *raftpb.Message {
+	return &raftpb.Message{
+		Type:    raftpb.MsgDRSyncResp,
+		Context: []byte(DrSyncPending),
+	}
+}
+
+func newDrSyncRespEntries(term, tHolder, committed, prevLogIndex, prevLogTerm uint64, entries []raftpb.Entry) *raftpb.Message {
+	return &raftpb.Message{
+		Type:    raftpb.MsgDRSyncResp,
+		Term:    term,
+		From:    tHolder,
+		Index:   prevLogIndex,
+		LogTerm: prevLogTerm,
+		Entries: entries,
+		Commit:  committed,
+		Context: []byte(DrSyncEntries),
+	}
+}
+
+func newDrSyncRespAdvance(term, committed uint64) *raftpb.Message {
+	return &raftpb.Message{
+		Type:    raftpb.MsgDRSyncResp,
+		Term:    term,
+		Commit:  committed,
+		Context: []byte(DrSyncAdvance),
 	}
 }
