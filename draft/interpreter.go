@@ -251,21 +251,18 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 			itp.lg.Info("receive an update from other file",
 				zap.String("rack", rack),
 				zap.String("file", update.SourceFile),
-				zap.Uint64("term", update.Term),
-				zap.Uint64("committed", update.Commit),
-				zap.Bool("has-append", !update.Collected.IsNotInitialized()),
-				zap.Bool("has-vote", update.LastVote != nil),
+				zap.Bool("has-app", update.App != nil),
+				zap.Bool("has-vote", update.Vote != nil),
 			)
 
-			if an != nil {
-				an.OfferRemoteEntries(update.Term, itp.f2p[update.SourceFile], update.Commit, update.Collected)
+			if an != nil && update.App != nil {
+				app := update.App
+				an.OfferRemoteEntries(app.Term, itp.f2p[update.SourceFile], app.Commit, app.AE)
 			}
 
-			if update.LastVote != nil {
+			if update.Vote != nil {
 				// only pending voting will be submit to the caller
-				if update.VotePend {
-					vote = append(vote, update.LastVote)
-				}
+				vote = append(vote, update.Vote)
 			}
 		}
 	}

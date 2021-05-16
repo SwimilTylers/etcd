@@ -7,17 +7,19 @@ import (
 	"path/filepath"
 )
 
+type AEUpdate struct {
+	Term   uint64
+	Commit uint64
+	AE     collector.EntryFragmentCollector
+}
+
 type Update struct {
 	SourceFile string
-	Term       uint64
 
 	ZeroDelta bool
 
-	Collected collector.EntryFragmentCollector
-	Commit    uint64
-
-	LastVote *raftpb.Message
-	VotePend bool
+	App  *AEUpdate
+	Vote *raftpb.Message
 
 	Err error
 }
@@ -36,14 +38,12 @@ func noUpdate(file string) *Update {
 	}
 }
 
-func newUpdate(file string, term uint64, c collector.EntryFragmentCollector, commit uint64, vote *raftpb.Message) *Update {
+func newUpdate(file string, app *AEUpdate, vote *raftpb.Message) *Update {
 	return &Update{
 		SourceFile: file,
-		Term:       term,
 		ZeroDelta:  false,
-		Collected:  c,
-		Commit:     commit,
-		LastVote:   vote,
+		App:        app,
+		Vote:       vote,
 	}
 }
 
@@ -197,20 +197,38 @@ func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c collector.Ent
 		return noUpdate(file)
 	}
 
+	var vote *raftpb.Message
+	var app *AEUpdate
+
 	for _, m := range messages {
-		if m.Type != raftpb.MsgApp && m.Type != raftpb.MsgHeartbeat {
-			continue
+		switch m.Type {
+		case raftpb.MsgPreVote, raftpb.MsgVote:
+			vote = &m
+		case raftpb.MsgApp:
+			vote = nil
+			app = refreshAEUpdate(app, m.Term, m.Commit, c)
+			c.AddEntriesWithSubmitter(m.Term, m.Entries, m.LogTerm, m.Index)
+		case raftpb.MsgHeartbeat:
+			vote = nil
+			app = refreshAEUpdate(app, m.Term, m.Commit, c)
+		}
+	}
+
+	return newUpdate(file, app, vote)
+}
+
+func refreshAEUpdate(app *AEUpdate, term, commit uint64, c collector.EntryFragmentCollector) *AEUpdate {
+	if app == nil {
+		app = &AEUpdate{Term: term, Commit: commit, AE: c}
+	} else {
+		if app.Term < term {
+			app.Term = term
 		}
 
-		c.AddEntriesWithSubmitter(m.Term, m.Entries, m.LogTerm, m.Index)
+		if app.Commit < commit {
+			app.Commit = commit
+		}
 	}
 
-	last := messages[len(messages)-1]
-	var vote *raftpb.Message = nil
-
-	if last.Type == raftpb.MsgVote {
-		vote = &last
-	}
-
-	return newUpdate(file, last.Term, c, last.Commit, vote)
+	return app
 }
