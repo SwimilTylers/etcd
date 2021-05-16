@@ -2,6 +2,7 @@ package etcdserver
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"go.etcd.io/etcd/adaptive"
@@ -11,6 +12,13 @@ import (
 	"os"
 	"sync"
 	"time"
+)
+
+type PerModeType string
+
+const (
+	PerModeDelayed   PerModeType = "PerModeDelayed"
+	PerModeImmediate PerModeType = "PerModeImmediate"
 )
 
 type SaucrRaftNode struct {
@@ -398,11 +406,11 @@ func (srn *SaucrRaftNode) processMessages(ms []raftpb.Message) []raftpb.Message 
 
 func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy, term uint64) []raftpb.Message {
 	if cfg != nil {
-		var mType raftpb.MessageType
+		var ctx []byte
 		if cfg.Fsync {
-			mType = raftpb.MsgSaucrSheltering
+			ctx = []byte(PerModeImmediate)
 		} else {
-			mType = raftpb.MsgSaucrNormal
+			ctx = []byte(PerModeDelayed)
 		}
 		msg := make([]raftpb.Message, len(srn.peers)-1)
 		count := 0
@@ -410,10 +418,11 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 			if peer != srn.self {
 				srn.PeerMonitor.Perceive(peer, false)
 				msg[count] = raftpb.Message{
-					Type: mType,
-					To:   peer,
-					From: srn.self,
-					Term: term,
+					Type:    raftpb.MsgPerMode,
+					To:      peer,
+					From:    srn.self,
+					Term:    term,
+					Context: ctx,
 				}
 				count++
 			}
@@ -423,11 +432,11 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 		}
 		return msg
 	} else if srn.syncMode && srn.syncModeItv <= time.Now().Sub(srn.syncModeLst) {
-		var mType raftpb.MessageType
+		var ctx []byte
 		if srn.currentMode == SHELTERING {
-			mType = raftpb.MsgSaucrSheltering
+			ctx = []byte(PerModeImmediate)
 		} else {
-			mType = raftpb.MsgSaucrNormal
+			ctx = []byte(PerModeDelayed)
 		}
 		msg := make([]raftpb.Message, len(srn.peers)-1)
 		count := 0
@@ -435,10 +444,11 @@ func (srn *SaucrRaftNode) broadcastCurrentMode(cfg *adaptive.PersistentStrategy,
 			if peer != srn.self {
 				srn.PeerMonitor.Perceive(peer, false)
 				msg[count] = raftpb.Message{
-					Type: mType,
-					To:   peer,
-					From: srn.self,
-					Term: term,
+					Type:    raftpb.MsgPerMode,
+					To:      peer,
+					From:    srn.self,
+					Term:    term,
+					Context: ctx,
 				}
 				count++
 			}
@@ -484,14 +494,14 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 		srn.term = h.Term
 	}
 	if msg, ok := srn.GetExactlyAndDropMsgSaucr(srn.term); ok && isFollower {
-		if msg.Type == raftpb.MsgSaucrNormal {
-			srn.transport.Send([]raftpb.Message{{
-				Type: raftpb.MsgSaucrNormalResp,
-				To:   msg.From,
-				From: srn.self,
-				Term: srn.term,
-			}})
+		srn.transport.Send([]raftpb.Message{{
+			Type: raftpb.MsgPerModeResp,
+			To:   msg.From,
+			From: srn.self,
+			Term: srn.term,
+		}})
 
+		if bytes.Equal(msg.Context, []byte(PerModeDelayed)) {
 			// if cfg is nil and current mode is consist with MsgType,
 			// that means no further update is necessary
 			if cfg == nil && srn.currentMode == NORMAL {
@@ -504,14 +514,7 @@ func (srn *SaucrRaftNode) updatePMonitorHard(cfg *adaptive.PerceptibleConfig, h 
 				cfg = srn.PeerMonitor.GetConfig()
 			}
 			cfg.Critical = false
-		} else if msg.Type == raftpb.MsgSaucrSheltering {
-			srn.transport.Send([]raftpb.Message{{
-				Type: raftpb.MsgSaucrShelteringResp,
-				To:   msg.From,
-				From: srn.self,
-				Term: srn.term,
-			}})
-
+		} else {
 			// if cfg is nil and current mode is consist with MsgType,
 			// that means no further update is necessary
 			if cfg == nil && srn.currentMode == SHELTERING {

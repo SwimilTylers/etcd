@@ -83,29 +83,27 @@ func (EntryType) EnumDescriptor() ([]byte, []int) { return fileDescriptorRaft, [
 type MessageType int32
 
 const (
-	MsgHup                 MessageType = 0
-	MsgBeat                MessageType = 1
-	MsgProp                MessageType = 2
-	MsgApp                 MessageType = 3
-	MsgAppResp             MessageType = 4
-	MsgVote                MessageType = 5
-	MsgVoteResp            MessageType = 6
-	MsgSnap                MessageType = 7
-	MsgHeartbeat           MessageType = 8
-	MsgHeartbeatResp       MessageType = 9
-	MsgUnreachable         MessageType = 10
-	MsgSnapStatus          MessageType = 11
-	MsgCheckQuorum         MessageType = 12
-	MsgTransferLeader      MessageType = 13
-	MsgTimeoutNow          MessageType = 14
-	MsgReadIndex           MessageType = 15
-	MsgReadIndexResp       MessageType = 16
-	MsgPreVote             MessageType = 17
-	MsgPreVoteResp         MessageType = 18
-	MsgSaucrNormal         MessageType = 40
-	MsgSaucrNormalResp     MessageType = 41
-	MsgSaucrSheltering     MessageType = 42
-	MsgSaucrShelteringResp MessageType = 43
+	MsgHup            MessageType = 0
+	MsgBeat           MessageType = 1
+	MsgProp           MessageType = 2
+	MsgApp            MessageType = 3
+	MsgAppResp        MessageType = 4
+	MsgVote           MessageType = 5
+	MsgVoteResp       MessageType = 6
+	MsgSnap           MessageType = 7
+	MsgHeartbeat      MessageType = 8
+	MsgHeartbeatResp  MessageType = 9
+	MsgUnreachable    MessageType = 10
+	MsgSnapStatus     MessageType = 11
+	MsgCheckQuorum    MessageType = 12
+	MsgTransferLeader MessageType = 13
+	MsgTimeoutNow     MessageType = 14
+	MsgReadIndex      MessageType = 15
+	MsgReadIndexResp  MessageType = 16
+	MsgPreVote        MessageType = 17
+	MsgPreVoteResp    MessageType = 18
+	MsgPerMode        MessageType = 40
+	MsgPerModeResp    MessageType = 41
 	MsgDRSync              MessageType = 46
 	MsgDRSyncResp          MessageType = 47
 )
@@ -130,10 +128,8 @@ var MessageType_name = map[int32]string{
 	16: "MsgReadIndexResp",
 	17: "MsgPreVote",
 	18: "MsgPreVoteResp",
-	40: "MsgSaucrNormal",
-	41: "MsgSaucrNormalResp",
-	42: "MsgSaucrSheltering",
-	43: "MsgSaucrShelteringResp",
+	40: "MsgPerMode",
+	41: "MsgPerModeResp",
 	46: "MsgDRSync",
 	47: "MsgDRSyncResp",
 }
@@ -158,10 +154,8 @@ var MessageType_value = map[string]int32{
 	"MsgReadIndexResp":       16,
 	"MsgPreVote":             17,
 	"MsgPreVoteResp":         18,
-	"MsgSaucrNormal":         40,
-	"MsgSaucrNormalResp":     41,
-	"MsgSaucrSheltering":     42,
-	"MsgSaucrShelteringResp": 43,
+	"MsgPerMode":        40,
+	"MsgPerModeResp":    41,
 	"MsgDRSync":              46,
 	"MsgDRSyncResp":          47,
 }
