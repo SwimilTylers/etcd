@@ -129,10 +129,43 @@ func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
 		return an.beforeAnalysis[i].CTerm < an.beforeAnalysis[j].CTerm
 	})
 
-	if an.compacted.IsEmpty() || an.compacted.IsNotInitialized() {
-		an.analyzeWithoutCompacted()
-	} else {
-		an.analyzeWithCompacted()
+	var checkBeforeCompact = false
+
+	if !an.beforeCompact.IsEmpty() {
+		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
+		loc := an.compacted.MatchIndex(prevLogTerm, firstIndex-1)
+		checkBeforeCompact = loc == collector.PREV || loc == collector.WITHIN
+	}
+
+	index := len(an.beforeAnalysis) - 1
+
+MergeInit:
+	for index >= 0 {
+		f := an.beforeAnalysis[index]
+		switch an.compacted.MatchIndex(f.LogIndex, f.LogTerm) {
+		case collector.UNDERFLOW:
+			panic("underflow occurs when merging beforeAnalysis")
+		case collector.PREV, collector.WITHIN:
+			// reset beforeCompact
+			an.beforeCompact.Refresh()
+			an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			an.bcCTerm = f.CTerm
+			an.bcCTHolder = an.beforeFingerprint[f]
+
+			an.mergeBeforeAnalysis(index + 1)
+			an.truncateCompacted()
+			break MergeInit
+		case collector.OVERFLOW:
+			if checkBeforeCompact {
+				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
+					an.bcCTerm = f.CTerm
+					an.bcCTHolder = an.beforeFingerprint[f]
+
+					an.mergeBeforeAnalysis(index + 1)
+					break MergeInit
+				}
+			}
+		}
 	}
 
 	an.analyzed = true
@@ -290,24 +323,7 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
 		return
 	}
 
-	prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
-	switch an.compacted.MatchIndex(prevLogTerm, firstIndex-1) {
-	case collector.UNDERFLOW:
-		// beforeCompact has more advanced index
-		panic("an underflow occurs in consistency check")
-	case collector.PREV, collector.WITHIN:
-		// resize compacted to fit beforeCompact
-		an.compacted.ResizeBriefToIndex(firstIndex - 1)
-		lastIndex := an.beforeCompact.LastIndex()
-		if an.beforeCommitted < lastIndex {
-			an.updateCommit(an.beforeCommitted)
-		} else {
-			an.updateCommit(lastIndex)
-		}
-		an.beforeCommitted = an.commit
-	case collector.CONFLICT:
-		panic("an conflict occurs in consistency check")
-	}
+	an.truncateCompacted()
 }
 
 func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
@@ -338,6 +354,52 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
 		an.updateCommit(lastIndex)
 	}
 	an.beforeCommitted = an.commit
+}
+
+func (an *MimicRaftKernelAnalyzer) mergeBeforeAnalysis(boundIndex int) {
+	size := len(an.beforeAnalysis)
+
+	for boundIndex < size {
+		index := size - 1
+		for index >= boundIndex {
+			f := an.beforeAnalysis[index]
+			if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
+				an.bcCTerm = f.CTerm
+				an.bcCTHolder = an.beforeFingerprint[f]
+				break
+			}
+			index--
+		}
+
+		if index < boundIndex {
+			break
+		}
+
+		boundIndex = index + 1
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) truncateCompacted() {
+	if !an.beforeCompact.IsEmpty() {
+		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
+		switch an.compacted.MatchIndex(prevLogTerm, firstIndex-1) {
+		case collector.UNDERFLOW:
+			// beforeCompact has more advanced index
+			panic("an underflow occurs in consistency check")
+		case collector.PREV, collector.WITHIN:
+			// resize compacted to fit beforeCompact
+			an.compacted.ResizeBriefToIndex(firstIndex - 1)
+			lastIndex := an.beforeCompact.LastIndex()
+			if an.beforeCommitted < lastIndex {
+				an.updateCommit(an.beforeCommitted)
+			} else {
+				an.updateCommit(lastIndex)
+			}
+			an.beforeCommitted = an.commit
+		case collector.CONFLICT:
+			panic("an conflict occurs in consistency check")
+		}
+	}
 }
 
 func (an *MimicRaftKernelAnalyzer) updateCommit(committed uint64) {
