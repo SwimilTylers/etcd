@@ -53,6 +53,10 @@ func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
 		if ok, r, f := itp.Locate(m); ok {
 			return itp.interpretApp(r, f, m)
 		}
+	case raftpb.MsgHeartbeat:
+		if ok, r, f := itp.Locate(m); ok {
+			itp.interpretHb(r, f, m)
+		}
 	case raftpb.MsgDRSync:
 		return itp.drSync(m)
 	}
@@ -139,17 +143,20 @@ func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.M
 
 	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
 		// normal case
-		return handleRequestVote(m, an.Term(), an.GetSubLocator(true))
+		resp := handleRequestVote(m, an.Term(), an.GetSubLocator(true))
+		an.TrySetTerm(m.Term)
+		return resp
 	}
 
 	an.AnalyzeAndRemoveOffers()
-	an.TrySetTerm(m.Term)
 	for _, v := range votes {
 		an.TrySetTerm(v.Term)
 	}
 
 	var locator = an.GetSubLocator(!an.Progress().NoProgress)
-	return handleRequestVote(m, an.Term(), locator)
+	resp := handleRequestVote(m, an.Term(), locator)
+	an.TrySetTerm(m.Term)
+	return resp
 }
 
 func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
@@ -203,6 +210,43 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 
 		return handleAppendEntries(m, an.Committed(), an.Term(), locator)
 	}
+}
+
+func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
+	an := itp.an[toRack]
+
+	if an.Term() > m.Term {
+		// a staled message, drop it
+		itp.lg.Warn("receive a staled message from raft kernel",
+			zap.Uint64("msg-term", m.Term),
+			zap.Uint64("itp-term", an.Term()),
+		)
+		return nil
+	}
+
+	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
+		itp.lg.Error("abort interpretation due to a write error", zap.Error(err))
+		return nil
+	}
+
+	var u bool
+	var votes []*raftpb.Message
+
+	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
+		// normal case, merge local offer
+		an.AnalyzeAndRemoveOffers()
+		an.Compact()
+		return handleHeartbeat(m, an.Term())
+	}
+
+	an.AnalyzeAndRemoveOffers()
+	an.TrySetTerm(m.Term)
+
+	for _, v := range votes {
+		an.TrySetTerm(v.Term)
+	}
+
+	return handleHeartbeat(m, an.Term())
 }
 
 func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targetFile string, an *MimicRaftKernelAnalyzer) error {
@@ -304,6 +348,10 @@ func handleRequestVote(vote *raftpb.Message, term uint64, locator collector.Loca
 	}
 }
 
+func handleHeartbeat(hb *raftpb.Message, term uint64) *raftpb.Message {
+	return newHbRespAccept(hb.From, hb.To, term, hb.Context)
+}
+
 func isUpdateTo(m *raftpb.Message, locator collector.Locator) bool {
 	lastIndex := locator.LastIndex()
 	_, lastTerm := locator.LocateIndex(lastIndex)
@@ -367,6 +415,28 @@ func newAppRespReject(appSender, appResponder, term, index, rejectHint uint64) *
 		Index:      index,
 		Reject:     true,
 		RejectHint: rejectHint,
+	}
+}
+
+func newHbRespAccept(hbSender, hbResponder, term uint64, ctx []byte) *raftpb.Message {
+	return &raftpb.Message{
+		Type:    raftpb.MsgHeartbeatResp,
+		To:      hbSender,
+		From:    hbResponder,
+		Term:    term,
+		Context: ctx,
+	}
+}
+
+func newHbRespReject(hbSender, hbResponder, term, rejectHint uint64, ctx []byte) *raftpb.Message {
+	return &raftpb.Message{
+		Type:       raftpb.MsgHeartbeatResp,
+		To:         hbSender,
+		From:       hbResponder,
+		Term:       term,
+		Reject:     true,
+		RejectHint: rejectHint,
+		Context:    ctx,
 	}
 }
 
