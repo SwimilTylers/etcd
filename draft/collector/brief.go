@@ -75,7 +75,15 @@ type MimicRaftKernelBriefCollector struct {
 }
 
 func NewMimicRaftKernelBriefCollector() *MimicRaftKernelBriefCollector {
-	return &MimicRaftKernelBriefCollector{}
+	return &MimicRaftKernelBriefCollector{initialized: false}
+}
+
+func NewInitializedMimicRaftKernelBriefCollector(logTerm, logIndex uint64) *MimicRaftKernelBriefCollector {
+	return &MimicRaftKernelBriefCollector{
+		logTerm:     logTerm,
+		logIndex:    logIndex,
+		initialized: true,
+	}
 }
 
 func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
@@ -192,6 +200,8 @@ func (c *MimicRaftKernelBriefCollector) init(ent []raftpb.Entry, logTerm, logInd
 	c.b = ExtractBriefFromEntries(logTerm, ent)
 	if len(c.b) != 0 {
 		c.next = c.b[len(c.b)-1]
+	} else {
+		c.next = nil
 	}
 }
 
