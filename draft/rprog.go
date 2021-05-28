@@ -49,6 +49,18 @@ type MimicRaftKernelAnalyzer struct {
 	beforeFingerprint map[*collector.EntryFragment]uint64
 	beforeCommitted   uint64
 	beforeTerm        uint64
+
+	bufSize int
+}
+
+func NewMimicRaftKernelAnalyzer(offerBufSize int) *MimicRaftKernelAnalyzer {
+	return &MimicRaftKernelAnalyzer{
+		compacted:         collector.NewInitializedMimicRaftKernelBriefCollector(0, 0),
+		beforeCompact:     collector.NewMimicRaftKernelCollector(),
+		beforeAnalysis:    make([]*collector.EntryFragment, 0, offerBufSize),
+		beforeFingerprint: make(map[*collector.EntryFragment]uint64, offerBufSize),
+		bufSize:           offerBufSize,
+	}
 }
 
 func (an *MimicRaftKernelAnalyzer) OfferLocalEntries(oTerm, oId, committed, prevLogTerm uint64, ent []raftpb.Entry) {
@@ -169,8 +181,7 @@ MergeInit:
 	}
 
 	an.analyzed = true
-	an.beforeAnalysis = an.beforeAnalysis[:0]
-	an.beforeFingerprint = make(map[*collector.EntryFragment]uint64)
+	an.removeOffers()
 }
 
 func (an *MimicRaftKernelAnalyzer) Committed() uint64 {
@@ -406,4 +417,13 @@ func (an *MimicRaftKernelAnalyzer) updateCommit(committed uint64) {
 	if committed > an.commit {
 		an.commit = committed
 	}
+}
+
+func (an *MimicRaftKernelAnalyzer) removeOffers() {
+	if len(an.beforeAnalysis) > an.bufSize {
+		an.beforeAnalysis = make([]*collector.EntryFragment, 0, an.bufSize)
+	} else {
+		an.beforeAnalysis = an.beforeAnalysis[:0]
+	}
+	an.beforeFingerprint = make(map[*collector.EntryFragment]uint64, an.bufSize)
 }
