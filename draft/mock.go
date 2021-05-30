@@ -19,8 +19,8 @@ func (m *mockingIMF) WriteIMF(message *raftpb.Message) error {
 	return m.write(message)
 }
 
-func (m *mockingIMF) ReadIMF(readFromIdx int) []raftpb.Message {
-	return m.read(readFromIdx)
+func (m *mockingIMF) ReadIMF(readFromIdx int) ([]raftpb.Message, error) {
+	return m.read(readFromIdx), nil
 }
 
 type mockingIMFStorage struct {

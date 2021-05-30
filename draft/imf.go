@@ -3,7 +3,7 @@ package draft
 import "go.etcd.io/etcd/raft/raftpb"
 
 type IMFReader interface {
-	ReadIMF(readFromIdx int) []raftpb.Message
+	ReadIMF(readFromIdx int) ([]raftpb.Message, error)
 }
 
 type IMFWriter interface {
