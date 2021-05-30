@@ -22,6 +22,105 @@ type Interpreter interface {
 	Interpret(m *raftpb.Message) []*raftpb.Message
 }
 
+type OneToOneInterpreterBuilder struct {
+	self  uint64
+	qSize int
+
+	racks []string
+	files []string
+
+	p2r map[uint64]string
+	p2f map[uint64]string
+	f2p map[string]uint64
+	r2a map[string]*MimicRaftKernelAnalyzer
+
+	costumedDrp  Primitives
+	defaultDrp   *PrimitiveProvider
+	mockAnalyzer *MimicRaftKernelAnalyzer
+}
+
+func NewOneToOneInterpreterBuilder(self uint64) *OneToOneInterpreterBuilder {
+	return &OneToOneInterpreterBuilder{
+		self:         self,
+		p2r:          make(map[uint64]string),
+		p2f:          make(map[uint64]string),
+		f2p:          make(map[string]uint64),
+		r2a:          make(map[string]*MimicRaftKernelAnalyzer),
+		defaultDrp:   NewPrimitiveProvider(),
+		mockAnalyzer: NewMimicRaftKernelAnalyzer(0),
+	}
+}
+
+func (b *OneToOneInterpreterBuilder) Map(id uint64, rack, file string) *OneToOneInterpreterBuilder {
+	_, rHas := b.r2a[rack]
+	_, fHas := b.f2p[file]
+
+	if rHas || fHas {
+		panic("multiple mapping detected")
+	}
+
+	b.qSize++
+	b.r2a[rack] = b.mockAnalyzer
+	b.f2p[file] = id
+
+	b.p2r[id] = rack
+	b.p2f[id] = file
+
+	b.racks = append(b.racks, rack)
+	b.files = append(b.files, file)
+
+	return b
+}
+
+func (b *OneToOneInterpreterBuilder) Bind(rack, file string, writer IMFWriter, reader IMFReader) *OneToOneInterpreterBuilder {
+	if writer != nil {
+		b.defaultDrp.GrantWrite(rack, file, writer)
+	}
+
+	if reader != nil {
+		b.defaultDrp.GrantRead(rack, file, reader, collector.NewMultiFragmentsCollector())
+	}
+
+	return b
+}
+
+func (b *OneToOneInterpreterBuilder) UseCostumedPrimitive(drp Primitives) *OneToOneInterpreterBuilder {
+	if drp != nil {
+		panic("illegal argument")
+	}
+
+	b.costumedDrp = drp
+	return b
+}
+
+func (b *OneToOneInterpreterBuilder) Build(lg *zap.Logger) *OneToOneInterpreter {
+	if b.qSize == 0 {
+		return nil
+	}
+
+	for _, r := range b.racks {
+		b.r2a[r] = NewMimicRaftKernelAnalyzer(b.qSize)
+	}
+
+	var drp Primitives = b.defaultDrp
+
+	if b.costumedDrp != nil {
+		drp = b.costumedDrp
+	}
+
+	return &OneToOneInterpreter{
+		lg:       lg,
+		racks:    b.racks,
+		syncRack: b.p2r[b.self],
+		p2r:      b.p2r,
+		files:    b.files,
+		p2f:      b.p2f,
+		f2p:      b.f2p,
+		drp:      drp,
+		an:       b.r2a,
+	}
+}
+
 type OneToOneInterpreter struct {
 	lg *zap.Logger
 
