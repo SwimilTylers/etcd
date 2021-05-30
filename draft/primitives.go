@@ -73,10 +73,13 @@ type updater struct {
 	reader IMFReader
 }
 
-func (u *updater) RecentIMF() []raftpb.Message {
-	messages := u.reader.ReadIMF(u.next)
-	u.next += len(messages)
-	return messages
+func (u *updater) RecentIMF() ([]raftpb.Message, error) {
+	if messages, err := u.reader.ReadIMF(u.next); err == nil {
+		return nil, err
+	} else {
+		u.next += len(messages)
+		return messages, nil
+	}
 }
 
 type PrimitiveProvider struct {
@@ -106,7 +109,7 @@ func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Mess
 		return nil
 	}
 
-	return os.ErrNotExist
+	return ErrWriterNotExist
 }
 
 func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update) error {
@@ -122,7 +125,7 @@ func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update
 		return nil
 	}
 
-	return os.ErrNotExist
+	return ErrReaderNotExist
 }
 
 func (pvd *PrimitiveProvider) Write(rack, file string, message *raftpb.Message) error {
@@ -191,7 +194,11 @@ func (pvd *PrimitiveProvider) ResetRead(rack, file string, idx int, cRefresh boo
 }
 
 func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c collector.EntryFragmentCollector) *Update {
-	messages := r.RecentIMF()
+	messages, err := r.RecentIMF()
+
+	if err != nil {
+		return errUpdate(file, err)
+	}
 
 	if len(messages) == 0 {
 		return noUpdate(file)
