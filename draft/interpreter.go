@@ -185,8 +185,14 @@ func (itp *OneToOneInterpreter) drSync(m *raftpb.Message) *raftpb.Message {
 
 	var u bool
 	var votes []*raftpb.Message
+	var err error
 
-	if u, votes = itp.getUpdatesFromOtherFiles(itp.syncRack, "", an); !u {
+	if u, votes, err = itp.getUpdatesFromOtherFiles(itp.syncRack, "", an); err != nil {
+		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		return nil
+	}
+
+	if !u {
 		// there is no update in racks, check out residual information in analyzer
 		pg := an.Progress()
 
@@ -239,8 +245,14 @@ func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.M
 
 	var u bool
 	var votes []*raftpb.Message
+	var err error
 
-	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
+	if u, votes, err = itp.getUpdatesFromOtherFiles(toRack, toFile, an); err != nil {
+		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		return nil
+	}
+
+	if !u {
 		// normal case
 		resp := handleRequestVote(m, an.Term(), an.GetSubLocator(true))
 		an.TrySetTerm(m.Term)
@@ -277,8 +289,14 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 
 	var u bool
 	var votes []*raftpb.Message
+	var err error
 
-	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
+	if u, votes, err = itp.getUpdatesFromOtherFiles(toRack, toFile, an); err != nil {
+		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		return nil
+	}
+
+	if !u {
 		// normal case, merge local offer
 		an.AnalyzeAndRemoveOffers()
 		an.Compact()
@@ -330,8 +348,14 @@ func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, m *raftpb.Mes
 
 	var u bool
 	var votes []*raftpb.Message
+	var err error
 
-	if u, votes = itp.getUpdatesFromOtherFiles(toRack, toFile, an); !u {
+	if u, votes, err = itp.getUpdatesFromOtherFiles(toRack, toFile, an); err != nil {
+		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		return nil
+	}
+
+	if !u {
 		// normal case, merge local offer
 		an.AnalyzeAndRemoveOffers()
 		an.Compact()
@@ -367,7 +391,7 @@ func (itp *OneToOneInterpreter) writeToTargetFile(m *raftpb.Message, rack, targe
 	return nil
 }
 
-func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, []*raftpb.Message) {
+func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string, an *MimicRaftKernelAnalyzer) (bool, []*raftpb.Message, error) {
 	var count = len(itp.files) - 1
 	var c = make(chan *Update, count)
 	for _, file := range itp.files {
@@ -378,6 +402,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 
 	var updated = false
 	var vote []*raftpb.Message
+	var err error
 
 	for i := 0; i < count; i++ {
 		update := <-c
@@ -389,6 +414,8 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 				zap.String("file", update.SourceFile),
 				zap.Error(update.Err),
 			)
+			err = update.Err
+			break
 		} else if !update.ZeroDelta {
 			updated = true
 			itp.lg.Info("receive an update from other file",
@@ -410,7 +437,7 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 		}
 	}
 
-	return updated, vote
+	return updated, vote, err
 }
 
 func handleAppendEntries(app *raftpb.Message, committed, term uint64, locator collector.Locator) *raftpb.Message {
