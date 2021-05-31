@@ -19,7 +19,7 @@ type Interpreter interface {
 	IsSupported(m *raftpb.Message) bool
 
 	//Interpret takes in Raft Request and gives out Raft Response
-	Interpret(m *raftpb.Message) []*raftpb.Message
+	Interpret(m *raftpb.Message) *raftpb.Message
 }
 
 type OneToOneInterpreterBuilder struct {
@@ -207,7 +207,7 @@ func (itp *OneToOneInterpreter) drSync(m *raftpb.Message) *raftpb.Message {
 		}
 	}
 
-	an.AnalyzeAndRemoveOffers()
+	an.AnalyzeAndRemoveOffers(MatchLastFragment)
 	an.TrySetTerm(m.Term)
 	for _, v := range votes {
 		an.TrySetTerm(v.Term)
@@ -259,7 +259,7 @@ func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.M
 		return resp
 	}
 
-	an.AnalyzeAndRemoveOffers()
+	an.AnalyzeAndRemoveOffers(MatchFirstFragment)
 	for _, v := range votes {
 		an.TrySetTerm(v.Term)
 	}
@@ -298,12 +298,12 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 
 	if !u {
 		// normal case, merge local offer
-		an.AnalyzeAndRemoveOffers()
+		an.AnalyzeAndRemoveOffers(MatchFirstFragment)
 		an.Compact()
 		return handleAppendEntries(m, an.Committed(), an.Term(), an.GetSubLocator(true))
 	}
 
-	an.AnalyzeAndRemoveOffers()
+	an.AnalyzeAndRemoveOffers(MatchFirstFragment)
 	an.TrySetTerm(m.Term)
 	for _, v := range votes {
 		an.TrySetTerm(v.Term)
@@ -357,12 +357,12 @@ func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, m *raftpb.Mes
 
 	if !u {
 		// normal case, merge local offer
-		an.AnalyzeAndRemoveOffers()
+		an.AnalyzeAndRemoveOffers(MatchLastFragment)
 		an.Compact()
 		return handleHeartbeat(m, an.Term())
 	}
 
-	an.AnalyzeAndRemoveOffers()
+	an.AnalyzeAndRemoveOffers(MatchLastFragment)
 	an.TrySetTerm(m.Term)
 
 	for _, v := range votes {

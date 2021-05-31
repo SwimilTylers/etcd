@@ -34,6 +34,14 @@ func newProgress(term, tHolder, commit, logTerm, logIndex uint64, ent []raftpb.E
 	}
 }
 
+type AnalysisPolicy uint8
+
+const (
+	UpdateCommittedOnly AnalysisPolicy = 0
+	MatchFirstFragment  AnalysisPolicy = 1
+	MatchLastFragment   AnalysisPolicy = 2
+)
+
 type MimicRaftKernelAnalyzer struct {
 	term   uint64
 	commit uint64
@@ -125,7 +133,7 @@ func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint
 	}
 }
 
-func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
+func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers(policy AnalysisPolicy) {
 	// whenever happens, update term first
 	// todo: what about the same term
 	if an.beforeTerm > an.term {
@@ -138,46 +146,32 @@ func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers() {
 
 	// sorting fragments
 	sort.Slice(an.beforeAnalysis, func(i, j int) bool {
-		return an.beforeAnalysis[i].CTerm < an.beforeAnalysis[j].CTerm
+		var ai = an.beforeAnalysis[i]
+		var aj = an.beforeAnalysis[j]
+
+		// comparing guarantor, ascending
+		if ai.CTerm != aj.CTerm {
+			return ai.CTerm < aj.CTerm
+		}
+
+		// comparing prefix, ascending
+		if ai.LogIndex != aj.LogIndex {
+			return ai.LogIndex < aj.LogIndex
+		}
+
+		// comparing entry length, descending
+		return len(ai.Fragment) > len(aj.Fragment)
 	})
 
-	var checkBeforeCompact = false
-
-	if !an.beforeCompact.IsEmpty() {
-		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
-		loc := an.compacted.MatchIndex(prevLogTerm, firstIndex-1)
-		checkBeforeCompact = loc == collector.PREV || loc == collector.WITHIN
-	}
-
-	index := len(an.beforeAnalysis) - 1
-
-MergeInit:
-	for index >= 0 {
-		f := an.beforeAnalysis[index]
-		switch an.compacted.MatchIndex(f.LogIndex, f.LogTerm) {
-		case collector.UNDERFLOW:
-			panic("underflow occurs when merging beforeAnalysis")
-		case collector.PREV, collector.WITHIN:
-			// reset beforeCompact
-			an.beforeCompact.Refresh()
-			an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex)
-			an.bcCTerm = f.CTerm
-			an.bcCTHolder = an.beforeFingerprint[f]
-
-			an.mergeBeforeAnalysis(index + 1)
-			an.truncateCompacted()
-			break MergeInit
-		case collector.OVERFLOW:
-			if checkBeforeCompact {
-				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
-					an.bcCTerm = f.CTerm
-					an.bcCTHolder = an.beforeFingerprint[f]
-
-					an.mergeBeforeAnalysis(index + 1)
-					break MergeInit
-				}
-			}
-		}
+	switch policy {
+	case UpdateCommittedOnly:
+		an.alignBeforeCommitted()
+	case MatchFirstFragment:
+		an.analyzePolicyFirstMatch()
+	case MatchLastFragment:
+		an.analyzePolicyLastMatch()
+	default:
+		panic("undefined policy")
 	}
 
 	an.analyzed = true
@@ -297,44 +291,30 @@ func (an *MimicRaftKernelAnalyzer) GetSubLocator(compacted bool) collector.Locat
 	}
 }
 
-func (an *MimicRaftKernelAnalyzer) analyzeWithCompacted() {
+func (an *MimicRaftKernelAnalyzer) analyzePolicyFirstMatch() {
 	for _, f := range an.beforeAnalysis {
 		// try to anchor it in the compacted analysis
 		switch an.compacted.MatchIndex(f.LogIndex, f.LogTerm) {
 		case collector.UNDERFLOW:
 			panic("an underflow occurs in compacted analysis")
-		case collector.WITHIN, collector.PREV, collector.OVERFLOW:
+		case collector.WITHIN, collector.PREV:
+			an.beforeCompact.Refresh()
+			an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			an.bcCTerm = f.CTerm
+			an.bcCTHolder = an.beforeFingerprint[f]
+
+			an.truncateCompacted()
+		case collector.OVERFLOW:
 			// matched in compacted analysis
-			ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
-			switch {
-			case ok:
+			if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
 				an.bcCTerm = f.CTerm
 				an.bcCTHolder = an.beforeFingerprint[f]
-			case !ok && loc == collector.UNDERFLOW:
-				// refresh beforeCompact with this fragment
-				an.beforeCompact.Refresh()
-				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
-					an.bcCTerm = f.CTerm
-					an.bcCTHolder = an.beforeFingerprint[f]
-				}
-			}
-		case collector.CONFLICT:
-			// mismatched in compact analysis, might matched in beforeCompact
-			if !an.beforeCompact.IsEmpty() &&
-				an.beforeCompact.MatchIndex(f.LogIndex, f.LogTerm) == collector.WITHIN {
-				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
-					an.bcCTerm = f.CTerm
-					an.bcCTHolder = an.beforeFingerprint[f]
-				}
 			}
 		}
 	}
 
-	if an.beforeCompact.IsEmpty() {
-		return
-	}
-
 	an.truncateCompacted()
+	an.alignBeforeCommitted()
 }
 
 func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
@@ -354,17 +334,50 @@ func (an *MimicRaftKernelAnalyzer) analyzeWithoutCompacted() {
 		}
 	}
 
-	if an.beforeCompact.IsEmpty() {
-		return
+	an.alignBeforeCommitted()
+}
+
+func (an *MimicRaftKernelAnalyzer) analyzePolicyLastMatch() {
+	var checkBeforeCompact = false
+
+	if !an.beforeCompact.IsEmpty() {
+		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
+		loc := an.compacted.MatchIndex(prevLogTerm, firstIndex-1)
+		checkBeforeCompact = loc == collector.PREV || loc == collector.WITHIN
 	}
 
-	lastIndex := an.beforeCompact.LastIndex()
-	if an.beforeCommitted < lastIndex {
-		an.updateCommit(an.beforeCommitted)
-	} else {
-		an.updateCommit(lastIndex)
+	index := len(an.beforeAnalysis) - 1
+
+MergeInit:
+	for index >= 0 {
+		f := an.beforeAnalysis[index]
+		switch an.compacted.MatchIndex(f.LogIndex, f.LogTerm) {
+		case collector.UNDERFLOW:
+			panic("underflow occurs when merging beforeAnalysis")
+		case collector.PREV, collector.WITHIN:
+			// reset beforeCompact
+			an.beforeCompact.Refresh()
+			an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex)
+			an.bcCTerm = f.CTerm
+			an.bcCTHolder = an.beforeFingerprint[f]
+
+			an.mergeBeforeAnalysis(index + 1)
+			an.truncateCompacted()
+			break MergeInit
+		case collector.OVERFLOW:
+			if checkBeforeCompact {
+				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
+					an.bcCTerm = f.CTerm
+					an.bcCTHolder = an.beforeFingerprint[f]
+
+					an.mergeBeforeAnalysis(index + 1)
+					break MergeInit
+				}
+			}
+		}
 	}
-	an.beforeCommitted = an.commit
+
+	an.alignBeforeCommitted()
 }
 
 func (an *MimicRaftKernelAnalyzer) mergeBeforeAnalysis(boundIndex int) {
@@ -410,6 +423,20 @@ func (an *MimicRaftKernelAnalyzer) truncateCompacted() {
 		case collector.CONFLICT:
 			panic("an conflict occurs in consistency check")
 		}
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) alignBeforeCommitted() {
+	if an.beforeCompact.IsEmpty() {
+		an.updateCommit(an.beforeCommitted)
+	} else {
+		lastIndex := an.beforeCompact.LastIndex()
+		if an.beforeCommitted < lastIndex {
+			an.updateCommit(an.beforeCommitted)
+		} else {
+			an.updateCommit(lastIndex)
+		}
+		an.beforeCommitted = an.commit
 	}
 }
 
