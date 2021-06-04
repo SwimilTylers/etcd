@@ -59,6 +59,8 @@ type MimicRaftKernelAnalyzer struct {
 	beforeTerm        uint64
 
 	bufSize int
+
+	rbFragments map[uint64][]*collector.EntryFragment
 }
 
 func NewMimicRaftKernelAnalyzer(offerBufSize int) *MimicRaftKernelAnalyzer {
@@ -289,6 +291,58 @@ func (an *MimicRaftKernelAnalyzer) GetSubLocator(compacted bool) collector.Locat
 	} else {
 		return an.beforeCompact
 	}
+}
+
+func (an *MimicRaftKernelAnalyzer) PrepareRollback() bool {
+	if an.analyzed {
+		return false
+	}
+
+	if an.rbFragments != nil {
+		panic("duplicated rollback")
+	}
+
+	an.rbFragments = make(map[uint64][]*collector.EntryFragment, an.bufSize)
+	for _, f := range an.beforeAnalysis {
+		id := an.beforeFingerprint[f]
+		an.rbFragments[id] = append(an.rbFragments[id], f)
+	}
+
+	// we do not have to rollback term and committed!
+
+	//an.beforeTerm = an.term
+	//an.beforeCommitted = an.commit
+
+	an.removeOffers()
+	an.analyzed = true
+
+	return true
+}
+
+func (an *MimicRaftKernelAnalyzer) RollbackOffers(id uint64, efc collector.EntryFragmentCollector) {
+	if len(an.rbFragments) == 0 {
+		return
+	}
+
+	defer func() {
+		delete(an.rbFragments, id)
+		if len(an.rbFragments) == 0 {
+			// release rollback-related resources
+			an.rbFragments = nil
+		}
+	}()
+
+	if fs, ok := an.rbFragments[id]; ok {
+		for _, f := range fs {
+			efc.AddEntriesWithSubmitter(f.CTerm, f.Fragment, f.LogTerm, f.LogIndex)
+		}
+	}
+}
+
+func (an *MimicRaftKernelAnalyzer) RollbackAll() map[uint64][]*collector.EntryFragment {
+	res := an.rbFragments
+	an.rbFragments = nil
+	return res
 }
 
 func (an *MimicRaftKernelAnalyzer) analyzePolicyFirstMatch() {
