@@ -6,19 +6,23 @@ type SandboxAnalyzer interface {
 	CommitSandbox()
 }
 
-type SandboxForMimicRaftKernelAnalyzer struct {
+type sbxMimicRaftKernelAnalyzer struct {
 	base    *MimicRaftKernelAnalyzer
 	sandbox *MimicRaftKernelAnalyzer
 }
 
-func (sbx *SandboxForMimicRaftKernelAnalyzer) PrepareSandbox() {
+func NewSandboxForMimicRaftKernelAnalyzer(an *MimicRaftKernelAnalyzer) SandboxAnalyzer {
+	return &sbxMimicRaftKernelAnalyzer{base: an}
+}
+
+func (sbx *sbxMimicRaftKernelAnalyzer) PrepareSandbox() {
 	sbx.sandbox = CloneMimicRaftKernelAnalyzer(sbx.base)
 }
 
-func (sbx *SandboxForMimicRaftKernelAnalyzer) GetSandbox() Analyzer {
+func (sbx *sbxMimicRaftKernelAnalyzer) GetSandbox() Analyzer {
 	return sbx.sandbox
 }
 
-func (sbx *SandboxForMimicRaftKernelAnalyzer) CommitSandbox() {
+func (sbx *sbxMimicRaftKernelAnalyzer) CommitSandbox() {
 	CopyMimicRaftKernelAnalyzer(sbx.base, sbx.sandbox)
 }
