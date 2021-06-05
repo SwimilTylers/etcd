@@ -76,6 +76,14 @@ func NewMimicRaftKernelCollector() *MimicRaftKernelCollector {
 	return &MimicRaftKernelCollector{copied: false, initialized: false}
 }
 
+func CloneMimicRaftKernelCollector(rkc *MimicRaftKernelCollector) *MimicRaftKernelCollector {
+	res := NewMimicRaftKernelCollector()
+	if ok, f, lt, li := rkc.FetchAllEntries(); ok {
+		res.AddEntries(f, lt, li)
+	}
+	return res
+}
+
 func (c *MimicRaftKernelCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
 	if c.IsNotInitialized() {
 		c.init(entries, logTerm, logIndex)

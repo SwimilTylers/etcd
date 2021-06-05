@@ -86,6 +86,20 @@ func NewInitializedMimicRaftKernelBriefCollector(logTerm, logIndex uint64) *Mimi
 	}
 }
 
+func CloneMimicRaftKernelBriefCollector(rkb *MimicRaftKernelBriefCollector) *MimicRaftKernelBriefCollector {
+	if rkb == nil || !rkb.initialized {
+		panic("illegal argument")
+	}
+
+	res := NewInitializedMimicRaftKernelBriefCollector(rkb.logTerm, rkb.logIndex)
+	res.b = append([]*BriefSegment{}, rkb.b...)
+	if len(res.b) != 0 {
+		res.next = res.b[len(res.b)-1]
+	}
+
+	return res
+}
+
 func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
 	if c.IsNotInitialized() {
 		c.init(entries, logTerm, logIndex)
