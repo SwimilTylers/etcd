@@ -3,7 +3,7 @@ package draft
 import "errors"
 
 var (
-	ErrReaderNotExist = errWriterNotExist()
+	ErrReaderNotExist = errReaderNotExist()
 	ErrWriterNotExist = errWriterNotExist()
 	ErrAsyncTimeout   = errAsyncTimeout()
 )
