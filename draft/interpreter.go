@@ -34,7 +34,7 @@ type OneToOneInterpreterBuilder struct {
 	f2p map[string]uint64
 	r2a map[string]*MimicRaftKernelAnalyzer
 
-	costumedDrp  Primitives
+	costumedDrp  PreservablePrimitives
 	defaultDrp   *PrimitiveProvider
 	mockAnalyzer *MimicRaftKernelAnalyzer
 }
@@ -84,7 +84,7 @@ func (b *OneToOneInterpreterBuilder) Bind(rack, file string, writer IMFWriter, r
 	return b
 }
 
-func (b *OneToOneInterpreterBuilder) UseCostumedPrimitive(drp Primitives) *OneToOneInterpreterBuilder {
+func (b *OneToOneInterpreterBuilder) UseCostumedPrimitive(drp *PrimitiveProvider) *OneToOneInterpreterBuilder {
 	if drp != nil {
 		panic("illegal argument")
 	}
@@ -102,7 +102,7 @@ func (b *OneToOneInterpreterBuilder) Build(lg *zap.Logger) *OneToOneInterpreter 
 		b.r2a[r] = NewMimicRaftKernelAnalyzer(b.qSize)
 	}
 
-	var drp Primitives = b.defaultDrp
+	var drp PreservablePrimitives = b.defaultDrp
 
 	if b.costumedDrp != nil {
 		drp = b.costumedDrp
@@ -132,7 +132,7 @@ type OneToOneInterpreter struct {
 	p2f   map[uint64]string
 	f2p   map[string]uint64
 
-	drp Primitives
+	drp PreservablePrimitives
 	an  map[string]*MimicRaftKernelAnalyzer
 }
 
@@ -157,7 +157,7 @@ func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
 			itp.interpretHb(r, f, m)
 		}
 	case raftpb.MsgDRSync:
-		return itp.drSync(m)
+		return itp.interpretDs(m)
 	}
 
 	return nil
@@ -179,8 +179,94 @@ func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, t
 	return true, toRack, toFile
 }
 
-func (itp *OneToOneInterpreter) drSync(m *raftpb.Message) *raftpb.Message {
-	// during drSync, we do not involve voting
+func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64, waitForLeader bool) (ready, onVoting bool, err error) {
+	an := itp.an[rack]
+
+	var u bool
+	var votes []*raftpb.Message
+
+	if !an.Analyzed() {
+		panic("illegal state of analyzer")
+	}
+
+	if u, votes, err = itp.getUpdatesFromOtherFiles(rack, "", an); err != nil {
+		return false, false, err
+	}
+
+	if !u {
+		an.TrySetTerm(localTerm)
+		if waitForLeader {
+			// wait for election result, holding on...
+			return false, true, nil
+		} else {
+			// just wait for log replication, safe to analyze
+			return true, false, nil
+		}
+	}
+
+	if len(votes) != 0 {
+		if an.Analyzed() {
+			// receive none AEUpdate from rack, leader does not appear yet
+			an.TrySetTerm(localTerm)
+			for _, v := range votes {
+				an.TrySetTerm(v.Term)
+			}
+			return !waitForLeader, true, nil
+		} else {
+			// receive some AEUpdate from rack, be alert
+			_, beforePg := an.UncheckedProgress()
+			onVoting = false
+			for _, v := range votes {
+				if v.Term > beforePg.Term {
+					onVoting = true
+				}
+			}
+
+			// election has come out a result, safe to log replication analysis
+			if !onVoting {
+				an.AnalyzeAndRemoveOffers(MatchLastFragment)
+				an.TrySetTerm(localTerm)
+				return true, false, nil
+			}
+
+			// election is undergoing, check potential progress conflict
+			sba := NewSandboxForMimicRaftKernelAnalyzer(an)
+
+			// get a snapshot of analyzer
+			sba.PrepareSandbox()
+
+			// analyzing based on the snapshot
+			sba.GetSandbox().AnalyzeAndRemoveOffers(MatchLastFragment)
+			sbxPg := sba.GetSandbox().Progress()
+
+			if sbxPg.NoProgress || existsUpToDateVote(sbxPg, votes) {
+				// no interference, commit sandbox
+				sba.CommitSandbox()
+				an.TrySetTerm(localTerm)
+				for _, v := range votes {
+					an.TrySetTerm(v.Term)
+				}
+				return true, true, nil
+			} else {
+				// interfere the election, rollback
+				itp.rollbackAnalyzer(rack, an, votes)
+				return false, true, nil
+			}
+		}
+	}
+
+	// log replication undergoing
+	an.AnalyzeAndRemoveOffers(MatchLastFragment)
+	an.TrySetTerm(localTerm)
+	for _, v := range votes {
+		an.TrySetTerm(v.Term)
+	}
+	return true, false, nil
+}
+
+//deprecated
+func (itp *OneToOneInterpreter) interpretDs(m *raftpb.Message) *raftpb.Message {
+	// during interpretDs, we do not involve voting
 	an := itp.an[itp.syncRack]
 
 	var u bool
@@ -440,6 +526,25 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 	return updated, vote, err
 }
 
+func (itp *OneToOneInterpreter) rollbackAnalyzer(rack string, an *MimicRaftKernelAnalyzer, votes []*raftpb.Message) {
+	an.DropOffers()
+
+	if len(votes) > 0 {
+		pVotes := make(map[string]*raftpb.Message, len(votes))
+		for _, v := range votes {
+			pVotes[itp.p2f[v.From]] = v
+		}
+
+		for _, file := range itp.files {
+			_ = itp.drp.Preserve(rack, file, pVotes[file])
+		}
+	} else {
+		for _, file := range itp.files {
+			_ = itp.drp.Preserve(rack, file, nil)
+		}
+	}
+}
+
 func handleAppendEntries(app *raftpb.Message, committed, term uint64, locator collector.Locator) *raftpb.Message {
 	// mimic the procedure of handleAppendEntries in raft kernel
 
@@ -491,6 +596,10 @@ func isUpdateTo(m *raftpb.Message, locator collector.Locator) bool {
 
 func hasProgress(m *raftpb.Message, committed uint64, pg *RackProgressDescriptor) bool {
 	return m.Commit < committed || !pg.NoProgress
+}
+
+func existsUpToDateVote(pg *RackProgressDescriptor, votes []*raftpb.Message) bool {
+	return true
 }
 
 func newVoteRespAccept(preVote bool, voteSender, voteResponder, term uint64) *raftpb.Message {
