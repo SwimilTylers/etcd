@@ -2,6 +2,7 @@ package draft
 
 import (
 	"go.etcd.io/etcd/draft/collector"
+	"go.etcd.io/etcd/raft"
 	"go.etcd.io/etcd/raft/raftpb"
 	"sort"
 )
@@ -282,18 +283,15 @@ func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
 	}
 }
 
-func (an *MimicRaftKernelAnalyzer) UncheckedProgress() *RackProgressDescriptor {
-	if !an.analyzed {
-		panic("some fragments are still no analyzed")
-	}
-
-	if an.beforeCompact.IsEmpty() {
-		return noProgress()
-	}
-
+func (an *MimicRaftKernelAnalyzer) UncheckedProgress() (*RackProgressDescriptor, *RackProgressDescriptor) {
 	_, ent, logTerm, logIndex := an.beforeCompact.FetchAllEntries()
-
-	return newProgress(an.bcCTerm, an.bcCTHolder, an.commit, logTerm, logIndex, ent)
+	if an.analyzed {
+		return newProgress(an.bcCTerm, an.bcCTHolder, an.commit, logTerm, logIndex, ent),
+			noProgress()
+	} else {
+		return newProgress(an.bcCTerm, an.bcCTHolder, an.commit, logTerm, logIndex, ent),
+			newProgress(an.beforeTerm, raft.None, an.beforeCommitted, 0, 0, nil)
+	}
 }
 
 func (an *MimicRaftKernelAnalyzer) Compact() {
@@ -352,6 +350,17 @@ func (an *MimicRaftKernelAnalyzer) GetSubLocator(compacted bool) collector.Locat
 	} else {
 		return an.beforeCompact
 	}
+}
+
+func (an *MimicRaftKernelAnalyzer) DropOffers() bool {
+	if an.analyzed {
+		return false
+	}
+
+	an.removeOffers()
+	an.analyzed = true
+
+	return true
 }
 
 func (an *MimicRaftKernelAnalyzer) PrepareRollback() bool {
@@ -440,6 +449,7 @@ MergeInit:
 					an.bcCTerm = f.CTerm
 					an.bcCTHolder = an.beforeFingerprint[f]
 					an.mergeBeforeAnalysisForward(index+1, strict)
+					an.truncateCompacted()
 					break MergeInit
 				}
 			}
@@ -532,6 +542,7 @@ MergeInit:
 					an.bcCTHolder = an.beforeFingerprint[f]
 
 					an.mergeBeforeAnalysisBackward(index + 1)
+					an.truncateCompacted()
 					break MergeInit
 				}
 			}
