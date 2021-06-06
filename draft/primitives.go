@@ -68,6 +68,13 @@ type Primitives interface {
 	AsyncPrimitives
 }
 
+type PreservablePrimitives interface {
+	Primitives
+
+	//Preserve holds the result of the last update
+	Preserve(rack, file string, vote *raftpb.Message) error
+}
+
 type updater struct {
 	next   int
 	reader IMFReader
@@ -82,17 +89,23 @@ func (u *updater) RecentIMF() ([]raftpb.Message, error) {
 	}
 }
 
+type efcInfo struct {
+	efc        collector.EntryFragmentCollector
+	refresh    bool
+	prefixVote *raftpb.Message
+}
+
 type PrimitiveProvider struct {
 	reader    map[string]*updater
 	writer    map[string]IMFWriter
-	collector map[string]collector.EntryFragmentCollector
+	collector map[string]*efcInfo
 }
 
 func NewPrimitiveProvider() *PrimitiveProvider {
 	return &PrimitiveProvider{
 		reader:    make(map[string]*updater),
 		writer:    make(map[string]IMFWriter),
-		collector: make(map[string]collector.EntryFragmentCollector),
+		collector: make(map[string]*efcInfo),
 	}
 }
 
@@ -115,12 +128,16 @@ func (pvd *PrimitiveProvider) AsyncWrite(rack, file string, message *raftpb.Mess
 func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update) error {
 	signature := filepath.Join(rack, file)
 	if r, ok := pvd.reader[signature]; ok {
-		ctr := pvd.collector[signature]
+		cInfo := pvd.collector[signature]
+		if cInfo.refresh {
+			cInfo.efc.Refresh()
+		} else {
+			cInfo.refresh = true
+		}
 
-		go func(c chan<- *Update, f string, u *updater, cl collector.EntryFragmentCollector) {
-			cl.Refresh()
-			c <- pvd.getUpdate(f, u, cl)
-		}(c, file, r, ctr)
+		go func(c chan<- *Update, f string, u *updater, efc collector.EntryFragmentCollector, pVote *raftpb.Message) {
+			c <- pvd.getUpdate(f, u, efc, pVote)
+		}(c, file, r, cInfo.efc, cInfo.prefixVote)
 
 		return nil
 	}
@@ -137,13 +154,29 @@ func (pvd *PrimitiveProvider) Write(rack, file string, message *raftpb.Message) 
 }
 
 func (pvd *PrimitiveProvider) GetUpdate(rack, file string) *Update {
-	if r, ok := pvd.reader[filepath.Join(rack, file)]; ok {
-		var c = pvd.collector[filepath.Join(rack, file)]
-		c.Refresh()
-		return pvd.getUpdate(file, r, c)
+	key := filepath.Join(rack, file)
+	if r, ok := pvd.reader[key]; ok {
+		var cInfo = pvd.collector[key]
+		if cInfo.refresh {
+			cInfo.efc.Refresh()
+		} else {
+			cInfo.refresh = true
+		}
+		return pvd.getUpdate(file, r, cInfo.efc, cInfo.prefixVote)
 	}
 
 	return errUpdate(file, os.ErrNotExist)
+}
+
+func (pvd *PrimitiveProvider) Preserve(rack, file string, vote *raftpb.Message) error {
+	key := filepath.Join(rack, file)
+	if cInfo, ok := pvd.collector[key]; ok {
+		cInfo.refresh = false
+		cInfo.prefixVote = vote
+
+		return nil
+	}
+	return ErrReaderNotExist
 }
 
 func (pvd *PrimitiveProvider) IMFWriter(rack, file string) IMFWriter {
@@ -164,7 +197,7 @@ func (pvd *PrimitiveProvider) IMFReader(rack, file string) (IMFReader, int) {
 
 func (pvd *PrimitiveProvider) EntryFragmentCollector(rack, file string) collector.EntryFragmentCollector {
 	key := filepath.Join(rack, file)
-	return pvd.collector[key]
+	return pvd.collector[key].efc
 }
 
 func (pvd *PrimitiveProvider) GrantRead(rack, file string, val IMFReader, c collector.EntryFragmentCollector) {
@@ -173,7 +206,7 @@ func (pvd *PrimitiveProvider) GrantRead(rack, file string, val IMFReader, c coll
 		next:   0,
 		reader: val,
 	}
-	pvd.collector[key] = c
+	pvd.collector[key] = &efcInfo{c, true, nil}
 }
 
 func (pvd *PrimitiveProvider) ResetRead(rack, file string, idx int, cRefresh bool) bool {
@@ -183,9 +216,11 @@ func (pvd *PrimitiveProvider) ResetRead(rack, file string, idx int, cRefresh boo
 
 	if uok && cok {
 		u.next = idx
+		c.refresh = true
 		if cRefresh {
-			c.Refresh()
+			c.efc.Refresh()
 		}
+		c.prefixVote = nil
 
 		return true
 	}
@@ -193,7 +228,7 @@ func (pvd *PrimitiveProvider) ResetRead(rack, file string, idx int, cRefresh boo
 	return false
 }
 
-func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c collector.EntryFragmentCollector) *Update {
+func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c collector.EntryFragmentCollector, vote *raftpb.Message) *Update {
 	messages, err := r.RecentIMF()
 
 	if err != nil {
@@ -204,7 +239,6 @@ func (pvd *PrimitiveProvider) getUpdate(file string, r *updater, c collector.Ent
 		return noUpdate(file)
 	}
 
-	var vote *raftpb.Message
 	var app *AEUpdate
 
 	for _, m := range messages {
