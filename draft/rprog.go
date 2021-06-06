@@ -54,6 +54,7 @@ type Analyzer interface {
 	Progress() *RackProgressDescriptor
 	Term() uint64
 	Committed() uint64
+	Analyzed() bool
 }
 
 type MimicRaftKernelAnalyzer struct {
@@ -250,6 +251,10 @@ func (an *MimicRaftKernelAnalyzer) Term() uint64 {
 	}
 
 	return an.term
+}
+
+func (an *MimicRaftKernelAnalyzer) Analyzed() bool {
+	return an.analyzed
 }
 
 func (an *MimicRaftKernelAnalyzer) Progress() *RackProgressDescriptor {
