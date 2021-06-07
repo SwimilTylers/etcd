@@ -81,7 +81,7 @@ type updater struct {
 }
 
 func (u *updater) RecentIMF() ([]raftpb.Message, error) {
-	if messages, err := u.reader.ReadIMF(u.next); err == nil {
+	if messages, err := u.reader.ReadIMF(u.next); err != nil {
 		return nil, err
 	} else {
 		u.next += len(messages)
