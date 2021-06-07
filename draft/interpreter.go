@@ -179,7 +179,7 @@ func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, t
 	return true, toRack, toFile
 }
 
-func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64, waitForLeader bool) (ready, onVoting bool, err error) {
+func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64) (ready, rollback bool, err error) {
 	an := itp.an[rack]
 
 	var u bool
@@ -193,75 +193,76 @@ func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64, waitForLea
 		return false, false, err
 	}
 
+	// nothing for analysis
+
 	if !u {
 		an.TrySetTerm(localTerm)
-		if waitForLeader {
-			// wait for election result, holding on...
-			return false, true, nil
-		} else {
-			// just wait for log replication, safe to analyze
-			return true, false, nil
-		}
+		return false, false, nil
 	}
 
-	if len(votes) != 0 {
-		if an.Analyzed() {
-			// receive none AEUpdate from rack, leader does not appear yet
+	// analyze updates
+
+	if len(votes) == 0 {
+		// log replication undergoing
+		an.AnalyzeAndRemoveOffers(MatchLastFragment)
+		an.TrySetTerm(localTerm)
+		for _, v := range votes {
+			an.TrySetTerm(v.Term)
+		}
+		return true, false, nil
+	}
+
+	// analyze votes
+
+	if an.Analyzed() {
+		// receive none AEUpdate from rack, leader does not appear yet
+		an.TrySetTerm(localTerm)
+		for _, v := range votes {
+			an.TrySetTerm(v.Term)
+		}
+		return true, false, nil
+	} else {
+		// receive some AEUpdate from rack, be alert
+		_, beforePg := an.UncheckedProgress()
+		onVoting := false
+		for _, v := range votes {
+			if v.Term > beforePg.Term {
+				onVoting = true
+				break
+			}
+		}
+
+		// election has come out a result, safe to log replication analysis
+		if !onVoting {
+			an.AnalyzeAndRemoveOffers(MatchLastFragment)
+			an.TrySetTerm(localTerm)
+			return true, false, nil
+		}
+
+		// election is undergoing, check potential progress conflict
+		sba := NewSandboxForMimicRaftKernelAnalyzer(an)
+
+		// get a snapshot of analyzer
+		sba.PrepareSandbox()
+
+		// analyzing based on the snapshot
+		sba.GetSandbox().AnalyzeAndRemoveOffers(MatchLastFragment)
+		sbxPg := sba.GetSandbox().Progress()
+
+		if sbxPg.NoProgress || hasMatchedVote(sbxPg, votes) {
+			// no interference, commit sandbox
+			sba.CommitSandbox()
 			an.TrySetTerm(localTerm)
 			for _, v := range votes {
 				an.TrySetTerm(v.Term)
 			}
-			return !waitForLeader, true, nil
+			return true, false, nil
 		} else {
-			// receive some AEUpdate from rack, be alert
-			_, beforePg := an.UncheckedProgress()
-			onVoting = false
-			for _, v := range votes {
-				if v.Term > beforePg.Term {
-					onVoting = true
-				}
-			}
-
-			// election has come out a result, safe to log replication analysis
-			if !onVoting {
-				an.AnalyzeAndRemoveOffers(MatchLastFragment)
-				an.TrySetTerm(localTerm)
-				return true, false, nil
-			}
-
-			// election is undergoing, check potential progress conflict
-			sba := NewSandboxForMimicRaftKernelAnalyzer(an)
-
-			// get a snapshot of analyzer
-			sba.PrepareSandbox()
-
-			// analyzing based on the snapshot
-			sba.GetSandbox().AnalyzeAndRemoveOffers(MatchLastFragment)
-			sbxPg := sba.GetSandbox().Progress()
-
-			if sbxPg.NoProgress || existsUpToDateVote(sbxPg, votes) {
-				// no interference, commit sandbox
-				sba.CommitSandbox()
-				an.TrySetTerm(localTerm)
-				for _, v := range votes {
-					an.TrySetTerm(v.Term)
-				}
-				return true, true, nil
-			} else {
-				// interfere the election, rollback
-				itp.rollbackAnalyzer(rack, an, votes)
-				return false, true, nil
-			}
+			// interfere the election, rollback
+			itp.rollbackAnalyzer(rack, an, votes)
+			return false, true, nil
 		}
 	}
-
-	// log replication undergoing
-	an.AnalyzeAndRemoveOffers(MatchLastFragment)
-	an.TrySetTerm(localTerm)
-	for _, v := range votes {
-		an.TrySetTerm(v.Term)
-	}
-	return true, false, nil
 }
 
 //deprecated
@@ -529,6 +530,8 @@ func (itp *OneToOneInterpreter) getUpdatesFromOtherFiles(rack, exceptFile string
 func (itp *OneToOneInterpreter) rollbackAnalyzer(rack string, an *MimicRaftKernelAnalyzer, votes []*raftpb.Message) {
 	an.DropOffers()
 
+	// here, an.Analyzed() == true
+
 	if len(votes) > 0 {
 		pVotes := make(map[string]*raftpb.Message, len(votes))
 		for _, v := range votes {
@@ -598,8 +601,17 @@ func hasProgress(m *raftpb.Message, committed uint64, pg *RackProgressDescriptor
 	return m.Commit < committed || !pg.NoProgress
 }
 
-func existsUpToDateVote(pg *RackProgressDescriptor, votes []*raftpb.Message) bool {
-	return true
+func hasMatchedVote(pg *RackProgressDescriptor, votes []*raftpb.Message) bool {
+	lastEnt := pg.Entries[len(pg.Entries)-1]
+	lastLogTerm, lastLogIndex := lastEnt.Term, lastEnt.Index
+
+	for _, v := range votes {
+		if v.LogTerm == lastLogTerm && v.Index >= lastLogIndex {
+			return true
+		}
+	}
+
+	return false
 }
 
 func newVoteRespAccept(preVote bool, voteSender, voteResponder, term uint64) *raftpb.Message {
