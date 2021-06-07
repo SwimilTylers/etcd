@@ -129,15 +129,18 @@ func (pvd *PrimitiveProvider) AsyncGetUpdate(rack, file string, c chan<- *Update
 	signature := filepath.Join(rack, file)
 	if r, ok := pvd.reader[signature]; ok {
 		cInfo := pvd.collector[signature]
+		var prefixVote *raftpb.Message = nil
 		if cInfo.refresh {
 			cInfo.efc.Refresh()
 		} else {
 			cInfo.refresh = true
+			prefixVote = cInfo.prefixVote
+			cInfo.prefixVote = nil
 		}
 
 		go func(c chan<- *Update, f string, u *updater, efc collector.EntryFragmentCollector, pVote *raftpb.Message) {
 			c <- pvd.getUpdate(f, u, efc, pVote)
-		}(c, file, r, cInfo.efc, cInfo.prefixVote)
+		}(c, file, r, cInfo.efc, prefixVote)
 
 		return nil
 	}
@@ -157,12 +160,15 @@ func (pvd *PrimitiveProvider) GetUpdate(rack, file string) *Update {
 	key := filepath.Join(rack, file)
 	if r, ok := pvd.reader[key]; ok {
 		var cInfo = pvd.collector[key]
+		var prefixVote *raftpb.Message = nil
 		if cInfo.refresh {
 			cInfo.efc.Refresh()
 		} else {
 			cInfo.refresh = true
+			prefixVote = cInfo.prefixVote
+			cInfo.prefixVote = nil
 		}
-		return pvd.getUpdate(file, r, cInfo.efc, cInfo.prefixVote)
+		return pvd.getUpdate(file, r, cInfo.efc, prefixVote)
 	}
 
 	return errUpdate(file, os.ErrNotExist)
