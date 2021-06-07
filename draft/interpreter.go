@@ -179,9 +179,7 @@ func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, t
 	return true, toRack, toFile
 }
 
-func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64) (ready, rollback bool, err error) {
-	an := itp.an[rack]
-
+func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64, an *MimicRaftKernelAnalyzer) (ready, rollback bool, err error) {
 	var u bool
 	var votes []*raftpb.Message
 
@@ -265,39 +263,25 @@ func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64) (ready, ro
 	}
 }
 
-//deprecated
 func (itp *OneToOneInterpreter) interpretDs(m *raftpb.Message) *raftpb.Message {
 	// during interpretDs, we do not involve voting
-	an := itp.an[itp.syncRack]
+	var rack string
 
-	var u bool
-	var votes []*raftpb.Message
+	if m.To == 0 {
+		rack = itp.syncRack
+	} else {
+		rack = itp.p2r[m.To]
+	}
+
+	an := itp.an[rack]
+
+	var ready bool
+	var rollback bool
 	var err error
 
-	if u, votes, err = itp.getUpdatesFromOtherFiles(itp.syncRack, "", an); err != nil {
-		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+	if ready, rollback, err = itp.drSync(rack, m.Term, an); err != nil {
+		itp.lg.Error("abort synchronization due to a read error", zap.Error(err))
 		return nil
-	}
-
-	if !u {
-		// there is no update in racks, check out residual information in analyzer
-		pg := an.Progress()
-
-		switch {
-		case !pg.NoProgress:
-			an.Compact()
-			return newDrSyncRespEntries(pg.Term, pg.TermHolder, pg.Commit, pg.LogIndex, pg.LogTerm, pg.Entries)
-		case an.Term() > m.Term, an.Committed() > m.Commit:
-			return newDrSyncRespAdvance(an.Term(), an.Committed())
-		default:
-			return nil
-		}
-	}
-
-	an.AnalyzeAndRemoveOffers(MatchLastFragment)
-	an.TrySetTerm(m.Term)
-	for _, v := range votes {
-		an.TrySetTerm(v.Term)
 	}
 
 	pg := an.Progress()
@@ -308,8 +292,12 @@ func (itp *OneToOneInterpreter) interpretDs(m *raftpb.Message) *raftpb.Message {
 		return newDrSyncRespEntries(pg.Term, pg.TermHolder, pg.Commit, pg.LogIndex, pg.LogTerm, pg.Entries)
 	case an.Term() > m.Term, an.Committed() > m.Commit:
 		return newDrSyncRespAdvance(an.Term(), an.Committed())
+	case ready:
+		return newDrSyncRespPending(false)
+	case rollback:
+		return newDrSyncRespPending(true)
 	default:
-		return newDrSyncRespPending()
+		return nil
 	}
 }
 
@@ -326,7 +314,10 @@ func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.M
 	}
 
 	if err := itp.writeToTargetFile(m, toRack, toFile, nil); err != nil {
-		itp.lg.Error("abort interpretation due to a write error", zap.Error(err))
+		itp.lg.Error("abort interpretation due to a write error",
+			zap.String("msg", "vote"),
+			zap.Error(err),
+		)
 		return nil
 	}
 
@@ -335,7 +326,10 @@ func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.M
 	var err error
 
 	if u, votes, err = itp.getUpdatesFromOtherFiles(toRack, toFile, an); err != nil {
-		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		itp.lg.Error("abort interpretation due to a read error",
+			zap.String("msg", "vote"),
+			zap.Error(err),
+		)
 		return nil
 	}
 
@@ -370,7 +364,10 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 	}
 
 	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
-		itp.lg.Error("abort interpretation due to a write error", zap.Error(err))
+		itp.lg.Error("abort interpretation due to a write error",
+			zap.String("msg", "app"),
+			zap.Error(err),
+		)
 		return nil
 	}
 
@@ -379,7 +376,10 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 	var err error
 
 	if u, votes, err = itp.getUpdatesFromOtherFiles(toRack, toFile, an); err != nil {
-		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		itp.lg.Error("abort interpretation due to a read error",
+			zap.String("msg", "app"),
+			zap.Error(err),
+		)
 		return nil
 	}
 
@@ -429,7 +429,10 @@ func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, m *raftpb.Mes
 	}
 
 	if err := itp.writeToTargetFile(m, toRack, toFile, an); err != nil {
-		itp.lg.Error("abort interpretation due to a write error", zap.Error(err))
+		itp.lg.Error("abort interpretation due to a write error",
+			zap.String("msg", "heartbeat"),
+			zap.Error(err),
+		)
 		return nil
 	}
 
@@ -438,7 +441,10 @@ func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, m *raftpb.Mes
 	var err error
 
 	if u, votes, err = itp.getUpdatesFromOtherFiles(toRack, toFile, an); err != nil {
-		itp.lg.Error("abort interpretation due to a read error", zap.Error(err))
+		itp.lg.Error("abort interpretation due to a read error",
+			zap.String("msg", "heartbeat"),
+			zap.Error(err),
+		)
 		return nil
 	}
 
@@ -687,9 +693,10 @@ func newHbRespReject(hbSender, hbResponder, term, rejectHint uint64, ctx []byte)
 	}
 }
 
-func newDrSyncRespPending() *raftpb.Message {
+func newDrSyncRespPending(forRollback bool) *raftpb.Message {
 	return &raftpb.Message{
 		Type:    raftpb.MsgDRSyncResp,
+		Reject:  forRollback,
 		Context: []byte(DrSyncPending),
 	}
 }
