@@ -14,6 +14,7 @@ const (
 	DrSyncAdvance DrSyncType = "DrSyncAdvance"
 )
 
+// Interpreter translate messages from raft.raft and generate response
 type Interpreter interface {
 	//IsSupported checks if translation service is available to this Message.
 	IsSupported(m *raftpb.Message) bool
@@ -47,7 +48,7 @@ func NewOneToOneInterpreterBuilder(self uint64) *OneToOneInterpreterBuilder {
 		f2p:          make(map[string]uint64),
 		r2a:          make(map[string]*MimicRaftKernelAnalyzer),
 		defaultDrp:   NewPrimitiveProvider(),
-		mockAnalyzer: NewMimicRaftKernelAnalyzer(0),
+		mockAnalyzer: &MimicRaftKernelAnalyzer{},
 	}
 }
 
@@ -121,6 +122,8 @@ func (b *OneToOneInterpreterBuilder) Build(lg *zap.Logger) *OneToOneInterpreter 
 	}
 }
 
+// OneToOneInterpreter is an implementation of Interpreter. It maps an peer id to one rack.
+// It is recommended to use OneToOneInterpreterBuilder for instantiating and populating.
 type OneToOneInterpreter struct {
 	lg *zap.Logger
 
@@ -145,38 +148,42 @@ func (itp *OneToOneInterpreter) IsSupported(m *raftpb.Message) bool {
 func (itp *OneToOneInterpreter) Interpret(m *raftpb.Message) *raftpb.Message {
 	switch m.Type {
 	case raftpb.MsgPreVote, raftpb.MsgVote:
-		if ok, r, f := itp.Locate(m); ok {
-			return itp.interpretVote(r, f, m)
+		if ok, r, f, an := itp.Locate(m); ok {
+			return itp.interpretVote(r, f, an, m)
 		}
 	case raftpb.MsgApp:
-		if ok, r, f := itp.Locate(m); ok {
-			return itp.interpretApp(r, f, m)
+		if ok, r, f, an := itp.Locate(m); ok {
+			return itp.interpretApp(r, f, an, m)
 		}
 	case raftpb.MsgHeartbeat:
-		if ok, r, f := itp.Locate(m); ok {
-			itp.interpretHb(r, f, m)
+		if ok, r, f, an := itp.Locate(m); ok {
+			itp.interpretHb(r, f, an, m)
 		}
 	case raftpb.MsgDRSync:
-		return itp.interpretDs(m)
+		if m.To == 0 {
+			return itp.interpretDs(itp.syncRack, itp.an[itp.syncRack], m)
+		} else if ok, r, _, an := itp.Locate(m); ok {
+			return itp.interpretDs(r, an, m)
+		}
 	}
 
 	return nil
 }
 
-func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, toRack, toFile string) {
+func (itp *OneToOneInterpreter) Locate(m *raftpb.Message) (accessibility bool, toRack, toFile string, an *MimicRaftKernelAnalyzer) {
 	var rOk, fOk bool
 
 	if toRack, rOk = itp.p2r[m.To]; !rOk {
 		itp.lg.Warn("peer id is not bind to any rack", zap.Uint64("peer-id", m.To))
-		return false, "", ""
+		return false, "", "", nil
 	}
 
 	if toFile, fOk = itp.p2f[m.From]; !fOk {
 		itp.lg.Warn("peer id is not bind to any file path", zap.Uint64("peer-id", m.From))
-		return false, "", ""
+		return false, "", "", nil
 	}
 
-	return true, toRack, toFile
+	return true, toRack, toFile, itp.an[toRack]
 }
 
 func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64, an *MimicRaftKernelAnalyzer) (ready, rollback bool, err error) {
@@ -263,18 +270,8 @@ func (itp *OneToOneInterpreter) drSync(rack string, localTerm uint64, an *MimicR
 	}
 }
 
-func (itp *OneToOneInterpreter) interpretDs(m *raftpb.Message) *raftpb.Message {
+func (itp *OneToOneInterpreter) interpretDs(rack string, an *MimicRaftKernelAnalyzer, m *raftpb.Message) *raftpb.Message {
 	// during interpretDs, we do not involve voting
-	var rack string
-
-	if m.To == 0 {
-		rack = itp.syncRack
-	} else {
-		rack = itp.p2r[m.To]
-	}
-
-	an := itp.an[rack]
-
 	var ready bool
 	var rollback bool
 	var err error
@@ -301,9 +298,7 @@ func (itp *OneToOneInterpreter) interpretDs(m *raftpb.Message) *raftpb.Message {
 	}
 }
 
-func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
-	an := itp.an[toRack]
-
+func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, an *MimicRaftKernelAnalyzer, m *raftpb.Message) *raftpb.Message {
 	if an.Term() > m.Term {
 		// a staled message, drop it
 		itp.lg.Warn("receive a staled message from raft kernel",
@@ -351,9 +346,7 @@ func (itp *OneToOneInterpreter) interpretVote(toRack, toFile string, m *raftpb.M
 	return resp
 }
 
-func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
-	an := itp.an[toRack]
-
+func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, an *MimicRaftKernelAnalyzer, m *raftpb.Message) *raftpb.Message {
 	if an.Term() > m.Term {
 		// a staled message, drop it
 		itp.lg.Warn("receive a staled message from raft kernel",
@@ -416,9 +409,7 @@ func (itp *OneToOneInterpreter) interpretApp(toRack, toFile string, m *raftpb.Me
 	}
 }
 
-func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, m *raftpb.Message) *raftpb.Message {
-	an := itp.an[toRack]
-
+func (itp *OneToOneInterpreter) interpretHb(toRack, toFile string, an *MimicRaftKernelAnalyzer, m *raftpb.Message) *raftpb.Message {
 	if an.Term() > m.Term {
 		// a staled message, drop it
 		itp.lg.Warn("receive a staled message from raft kernel",
