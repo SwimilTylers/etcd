@@ -1,21 +1,38 @@
 package draft
 
-import "errors"
-
-var (
-	ErrReaderNotExist = errReaderNotExist()
-	ErrWriterNotExist = errWriterNotExist()
-	ErrAsyncTimeout   = errAsyncTimeout()
+import (
+	"errors"
+	"fmt"
 )
 
-func errReaderNotExist() error {
-	return errors.New("reader does not exist")
+var (
+	ErrDupStart     = errModuleStart("duplicated start")
+	ErrUnchangeable = errModule("change the status")
+
+	ErrReaderNotExist    = errModule("reader not exist")
+	ErrWriterNotExist    = errModule("writer not exist")
+	ErrCollectorNotExist = errModule("collector not exist")
+
+	ErrImfDenied    = errModuleStart("denied")
+	ErrImfOpTimeout = errImfModuleStatus("imf operation timeouts")
+)
+
+func errModuleStart(text string) error {
+	return errors.New("module failed to start: " + text)
 }
 
-func errWriterNotExist() error {
-	return errors.New("writer does not exist")
+func errModule(text string) error {
+	return errors.New("module failed to comply: " + text)
 }
 
-func errAsyncTimeout() error {
-	return errors.New("async primitive timeouts")
+func errImfModuleStart(text string) error {
+	return errors.New("imf module failed to start: " + text)
+}
+
+func errImfModuleStatus(text string) error {
+	return errors.New("imf module status error: " + text)
+}
+
+func ErrImfModuleInternal(err error) error {
+	return fmt.Errorf("an internal error occurs in imf module: %w", err)
 }
