@@ -4,6 +4,7 @@ import (
 	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
+	"sync"
 )
 
 type DrSyncType string
@@ -26,6 +27,8 @@ type Interpreter interface {
 type OneToOneInterpreterBuilder struct {
 	self  uint64
 	qSize int
+
+	ids []uint64
 
 	racks []string
 	files []string
@@ -67,6 +70,7 @@ func (b *OneToOneInterpreterBuilder) Map(id uint64, rack, file string) *OneToOne
 	b.p2r[id] = rack
 	b.p2f[id] = file
 
+	b.ids = append(b.ids, id)
 	b.racks = append(b.racks, rack)
 	b.files = append(b.files, file)
 
@@ -119,6 +123,22 @@ func (b *OneToOneInterpreterBuilder) Build(lg *zap.Logger) *OneToOneInterpreter 
 		f2p:      b.f2p,
 		drp:      drp,
 		an:       b.r2a,
+	}
+}
+
+func (b *OneToOneInterpreterBuilder) BuildParallel(lg *zap.Logger, cBufSize int) ParallelInterpreter {
+	if b.qSize == 0 {
+		return nil
+	}
+
+	itp := b.Build(lg)
+	return &parallelInterpreter{
+		lg:        lg,
+		bufSize:   cBufSize,
+		mu:        &sync.Mutex{},
+		itp:       itp,
+		reach:     b.ids,
+		onRunning: false,
 	}
 }
 
