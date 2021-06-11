@@ -25,7 +25,6 @@ type EntryFragmentCollector interface {
 	//FetchAllFragments fetches all fragments from internal structure. Return false if it is empty.
 	FetchAllFragments() (bool, []*EntryFragment)
 
-	Briefer
 	Refresher
 }
 
@@ -86,10 +85,6 @@ func (c *SingleFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
 	}}
 }
 
-func (c *SingleFragmentCollector) Briefing() []*BriefSegment {
-	return c.cec.Briefing()
-}
-
 func (c *SingleFragmentCollector) IsNotInitialized() bool {
 	return c.cec.IsNotInitialized()
 }
@@ -101,22 +96,17 @@ func (c *SingleFragmentCollector) Refresh() {
 
 //MultiFragmentsCollector is an implementation of EntryFragmentCollector.
 type MultiFragmentsCollector struct {
-	fec        *LinkedListCollector
-	gGuarantor uint64
+	*LinkedListCollector
 }
 
 func NewMultiFragmentsCollector() *MultiFragmentsCollector {
-	return &MultiFragmentsCollector{NewLinkedListCollector(true, func() Collector { return NewMimicRaftKernelCollector() }), 0}
+	return &MultiFragmentsCollector{
+		NewLinkedListCollector(true, func() Collector { return NewMimicRaftKernelCollector() }),
+	}
 }
 
 func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
-	if sTerm < c.gGuarantor {
-		return false
-	}
-
-	c.fec.AddEntries(entries, logTerm, logIndex)
-	c.fec.tail.info = sTerm
-
+	c.addEntries(false, entries, logTerm, logIndex).info = sTerm
 	return true
 }
 
@@ -145,21 +135,9 @@ func (c *MultiFragmentsCollector) FetchAllFragments() (bool, []*EntryFragment) {
 	return true, c.fetchFragments(0)
 }
 
-func (c *MultiFragmentsCollector) Briefing() []*BriefSegment {
-	return c.fec.Briefing()
-}
-
-func (c *MultiFragmentsCollector) IsNotInitialized() bool {
-	return c.fec.IsNotInitialized()
-}
-
-func (c *MultiFragmentsCollector) Refresh() {
-	c.fec.Refresh()
-}
-
 func (c *MultiFragmentsCollector) fetchFragments(index uint64) []*EntryFragment {
 	var result []*EntryFragment
-	needle := c.fec.head
+	needle := c.head
 
 	for needle != nil {
 		if ok, ent, logTerm, logIndex := needle.FetchEntriesWithStartIndex(index); ok {

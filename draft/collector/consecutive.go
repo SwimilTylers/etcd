@@ -47,7 +47,6 @@ type ConsecutiveEntryCollector interface {
 
 	Locator
 	EntryFetcher
-	Briefer
 	Refresher
 }
 
