@@ -4,11 +4,6 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 )
 
-type Briefer interface {
-	//Briefing makes a brief report of the collector.
-	Briefing() []*BriefSegment
-}
-
 type BriefSegment struct {
 	Term        uint64
 	PrevLogTerm uint64
@@ -59,8 +54,9 @@ type BriefSegmentCollector interface {
 
 	ResizeBriefToIndex(index uint64) (bool, Location)
 
+	Briefing() []*BriefSegment
+
 	Locator
-	Briefer
 	Refresher
 }
 
@@ -135,6 +131,10 @@ func (c *MimicRaftKernelBriefCollector) ResizeBriefToIndex(index uint64) (bool, 
 	}
 }
 
+func (c *MimicRaftKernelBriefCollector) Briefing() []*BriefSegment {
+	return c.b
+}
+
 func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location {
 	if c.IsNotInitialized() {
 		panic("not initialized")
@@ -152,11 +152,11 @@ func (c *MimicRaftKernelBriefCollector) LocateIndex(index uint64) (Location, uin
 
 	switch {
 	case index < first-1:
-		return UNDERFLOW, -1
+		return UNDERFLOW, 0
 	case index == first-1:
 		return PREV, c.b[0].PrevLogTerm
 	case index > last:
-		return OVERFLOW, -1
+		return OVERFLOW, 0
 	default:
 		idx := c.locateIndex(index, 0, len(c.b))
 		return WITHIN, c.b[idx].Term
@@ -196,14 +196,6 @@ func (c *MimicRaftKernelBriefCollector) Refresh() {
 	c.b = nil
 	c.next = nil
 	c.initialized = false
-}
-
-func (c *MimicRaftKernelBriefCollector) Briefing() []*BriefSegment {
-	if c.IsNotInitialized() || c.IsEmpty() {
-		return nil
-	}
-
-	return c.b
 }
 
 func (c *MimicRaftKernelBriefCollector) init(ent []raftpb.Entry, logTerm, logIndex uint64) {
