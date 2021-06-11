@@ -215,7 +215,7 @@ func TestUpdateCollectedEntries(t *testing.T) {
 				t.Errorf("entry is incorrectly collected: seed=%v", seed)
 			}
 			mes0, mes1, uu, _ := runTestUpdateCollectedEntriesOverride(ids, rnd)
-			if !mes0.EquivEntrySeq(uu.Collected) && !mes1.EquivEntrySeq(uu.Collected) {
+			if mes0.EquivEntrySeq(uu.App.AE) || !mes1.EquivEntrySeq(uu.App.AE) {
 				t.Errorf("joint entry is incorrectly collected: seed=%v", seed)
 			}
 		})
