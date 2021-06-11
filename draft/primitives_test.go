@@ -43,7 +43,7 @@ func TestVoteUpdate(t *testing.T) {
 					if other != to {
 						r, f := ft2rf(other, to)
 						if other == from {
-							if !reflect.DeepEqual(pp.GetUpdate(r, f), newUpdate(f, 1, pp.collector[token], 0, vote)) {
+							if !reflect.DeepEqual(pp.GetUpdate(r, f), newUpdate(f, nil, vote)) {
 								t.Fatalf("vote=%v, rack=%s, file=%s: should receive vote", from, r, f)
 							}
 						} else {
@@ -75,11 +75,11 @@ func TestAppendUpdate(t *testing.T) {
 						if other == from {
 							u := pp.GetUpdate(r, f)
 
-							if u.LastVote != nil {
+							if u.Vote != nil {
 								t.Fatalf("append=%v, rack=%s, file=%s: should receive no vote", from, r, f)
 							}
 
-							ok, fs := u.Collected.FetchAllFragments()
+							ok, fs := u.App.AE.FetchAllFragments()
 							ent, lt, li := fs[0].Fragment, fs[0].LogTerm, fs[0].LogIndex
 							if !ok || lt != app.LogTerm || li != app.Index || !reflect.DeepEqual(ent, app.Entries) {
 								oks := fmt.Sprintf("[%v/%v]", ok, true)
@@ -89,7 +89,7 @@ func TestAppendUpdate(t *testing.T) {
 								t.Fatalf("append=%v, rack=%s, file=%s: collector borkened \n==>%s\t%s\t%s\t%s", from, r, f, oks, ents, lts, lis)
 							}
 
-							if !reflect.DeepEqual(u, newUpdate(f, app.Term, pp.collector[token], app.Commit, nil)) {
+							if !reflect.DeepEqual(u, newUpdate(f, &AEUpdate{app.Term, app.Commit, pp.collector[token].efc}, nil)) {
 								t.Fatalf("append=%v, rack=%s, file=%s: should receive appropriate append", from, r, f)
 							}
 						} else {
@@ -133,7 +133,7 @@ func TestVoteWrite(t *testing.T) {
 
 					r, f := ft2rf(from, to)
 					if from == host {
-						if !reflect.DeepEqual(votes[to], ppo.GetUpdate(r, f).LastVote) {
+						if !reflect.DeepEqual(votes[to], ppo.GetUpdate(r, f).Vote) {
 							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should receive vote", other, from, r, f)
 						}
 					} else {
@@ -178,7 +178,7 @@ func TestAppendWrite(t *testing.T) {
 					if from == host {
 						u := ppo.GetUpdate(r, f)
 
-						_, fs := u.Collected.FetchAllFragments()
+						_, fs := u.App.AE.FetchAllFragments()
 						if !reflect.DeepEqual(appends[to].Entries, fs[0].Fragment) {
 							t.Fatalf("prespective=%v, vote=%v, rack=%s, file=%s: should receive vote", other, from, r, f)
 						}
@@ -211,7 +211,7 @@ func TestUpdateCollectedEntries(t *testing.T) {
 		rnd := rand.New(rand.NewSource(seed))
 		t.Run("", func(t *testing.T) {
 			mes, u, _ := runTestUpdateCollectedEntries(ids, rnd)
-			if !mes.EquivEntrySeq(u.Collected) {
+			if !mes.EquivEntrySeq(u.App.AE) {
 				t.Errorf("entry is incorrectly collected: seed=%v", seed)
 			}
 			mes0, mes1, uu, _ := runTestUpdateCollectedEntriesOverride(ids, rnd)
@@ -224,18 +224,18 @@ func TestUpdateCollectedEntries(t *testing.T) {
 
 func TestUpdateCollectedEntriesOnce(t *testing.T) {
 	ids := []uint64{0, 1, 2, 3, 4}
-	var seed int64 = 2933568871211445515
+	var seed int64 = 5577006791947779410
 	rnd := rand.New(rand.NewSource(seed))
 
 	mes, u, actions := runTestUpdateCollectedEntries(ids, rnd)
 
-	if !mes.EquivEntrySeq(u.Collected) {
+	if !mes.EquivEntrySeq(u.App.AE) {
 		t.Errorf("entry is incorrectly collected: len=%v, actions=%v", mes.entLen, actions)
 	}
 
 	mes0, mes1, uu, actions0 := runTestUpdateCollectedEntriesOverride(ids, rnd)
-	if !mes0.EquivEntrySeq(uu.Collected) && !mes1.EquivEntrySeq(uu.Collected) {
-		t.Errorf("entry is incorrectly collected: len0=%v, len1=%v, actions=%v", mes0.entLen, mes1.entLen, actions0)
+	if mes0.EquivEntrySeq(uu.App.AE) || !mes1.EquivEntrySeq(uu.App.AE) {
+		t.Errorf("entry is incorrectly collected: len0=%v, len1=%v, actions=\n%v", mes0.entLen, mes1.entLen, actions0[len(actions0)-1])
 	}
 }
 
@@ -253,7 +253,7 @@ func runTestUpdateCollectedEntries(ids []uint64, rnd *rand.Rand) (*mockingEntryS
 
 	mes, actions := appendRandomWalk(plt, pli, entries, mis[token].AutoVote(), rnd)
 	for _, m := range mrs[token].GetAll() {
-		lpp.Write(r, f, m)
+		_ = lpp.Write(r, f, m)
 	}
 
 	u := pps[follower].GetUpdate(r, f)
@@ -283,6 +283,8 @@ func runTestUpdateCollectedEntriesOverride(ids []uint64, rnd *rand.Rand) (*mocki
 	actions = append(actions, actions0...)
 	actions = append(actions, "[1]")
 	actions = append(actions, actions1...)
+
+	actions = append(actions, messageToStrings(mrs[token].buf, entries, entries0))
 
 	for _, m := range mrs[token].GetAll() {
 		lpp.Write(r, f, m)
