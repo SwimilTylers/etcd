@@ -431,7 +431,7 @@ func (an *MimicRaftKernelAnalyzer) analyzePolicyFirstMatch(strict bool) {
 
 	if !an.beforeCompact.IsEmpty() {
 		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
-		loc := an.compacted.MatchIndex(prevLogTerm, firstIndex-1)
+		loc := an.compacted.MatchIndex(firstIndex-1, prevLogTerm)
 		checkBeforeCompact = loc == collector.PREV || loc == collector.WITHIN
 	}
 
@@ -525,7 +525,7 @@ func (an *MimicRaftKernelAnalyzer) analyzePolicyLastMatch() {
 
 	if !an.beforeCompact.IsEmpty() {
 		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
-		loc := an.compacted.MatchIndex(prevLogTerm, firstIndex-1)
+		loc := an.compacted.MatchIndex(firstIndex-1, prevLogTerm)
 		checkBeforeCompact = loc == collector.PREV || loc == collector.WITHIN
 	}
 
@@ -638,7 +638,7 @@ func (an *MimicRaftKernelAnalyzer) mergeBeforeAnalysisBackward(from int) {
 func (an *MimicRaftKernelAnalyzer) truncateCompacted() {
 	if !an.beforeCompact.IsEmpty() {
 		prevLogTerm, firstIndex := an.beforeCompact.PrevLogTerm(), an.beforeCompact.FirstIndex()
-		switch an.compacted.MatchIndex(prevLogTerm, firstIndex-1) {
+		switch an.compacted.MatchIndex(firstIndex-1, prevLogTerm) {
 		case collector.UNDERFLOW:
 			// beforeCompact has more advanced index
 			panic("an underflow occurs in consistency check")
