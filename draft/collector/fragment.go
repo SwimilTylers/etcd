@@ -52,7 +52,7 @@ func (c *SingleFragmentCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 }
 
 func (c *SingleFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil
 	}
 
@@ -71,7 +71,7 @@ func (c *SingleFragmentCollector) FetchFragmentsWithStartIndex(index uint64) (bo
 }
 
 func (c *SingleFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil
 	}
 
@@ -85,8 +85,8 @@ func (c *SingleFragmentCollector) FetchAllFragments() (bool, []*EntryFragment) {
 	}}
 }
 
-func (c *SingleFragmentCollector) IsNotInitialized() bool {
-	return c.cec.IsNotInitialized()
+func (c *SingleFragmentCollector) IsRefreshed() bool {
+	return c.cec.IsRefreshed()
 }
 
 func (c *SingleFragmentCollector) Refresh() {
@@ -113,7 +113,7 @@ func (c *MultiFragmentsCollector) AddEntriesWithSubmitter(sTerm uint64, entries 
 //FetchFragmentsWithStartIndex fetches fragments with index >= startIndex. If part of some Fragment
 // is not satisfied, truncate it. Return false if no such a Fragment.
 func (c *MultiFragmentsCollector) FetchFragmentsWithStartIndex(index uint64) (bool, []*EntryFragment) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil
 	}
 
@@ -128,7 +128,7 @@ func (c *MultiFragmentsCollector) FetchFragmentsWithStartIndex(index uint64) (bo
 
 //FetchAllFragments fetches all fragments from the list. Return false if it is empty.
 func (c *MultiFragmentsCollector) FetchAllFragments() (bool, []*EntryFragment) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil
 	}
 

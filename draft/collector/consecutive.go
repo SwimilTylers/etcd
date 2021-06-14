@@ -84,7 +84,7 @@ func CloneMimicRaftKernelCollector(rkc *MimicRaftKernelCollector) *MimicRaftKern
 }
 
 func (c *MimicRaftKernelCollector) AddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		c.init(entries, logTerm, logIndex)
 		return true
 	}
@@ -94,7 +94,7 @@ func (c *MimicRaftKernelCollector) AddEntries(entries []raftpb.Entry, logTerm ui
 }
 
 func (c *MimicRaftKernelCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil, 0, 0
 	}
 
@@ -119,7 +119,7 @@ func (c *MimicRaftKernelCollector) FetchEntries(term uint64) (bool, []raftpb.Ent
 }
 
 func (c *MimicRaftKernelCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil, 0, 0
 	}
 
@@ -137,7 +137,7 @@ func (c *MimicRaftKernelCollector) FetchEntriesWithStartIndex(index uint64) (boo
 }
 
 func (c *MimicRaftKernelCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil, 0, 0
 	}
 
@@ -145,7 +145,7 @@ func (c *MimicRaftKernelCollector) FetchAllEntries() (bool, []raftpb.Entry, uint
 }
 
 func (c *MimicRaftKernelCollector) Refresh() {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return
 	}
 
@@ -156,7 +156,7 @@ func (c *MimicRaftKernelCollector) Refresh() {
 }
 
 func (c *MimicRaftKernelCollector) Briefing() []*BriefSegment {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		return nil
 	}
 
@@ -191,13 +191,13 @@ func (c *MimicRaftKernelCollector) Briefing() []*BriefSegment {
 	return result
 }
 
-func (c *MimicRaftKernelCollector) IsNotInitialized() bool {
+func (c *MimicRaftKernelCollector) IsRefreshed() bool {
 	return !c.initialized
 }
 
 //TryAddEntries of MimicRaftKernelCollector mimics the behavior of raft kernel
 func (c *MimicRaftKernelCollector) TryAddEntries(entries []raftpb.Entry, logTerm uint64, logIndex uint64) (bool, Location) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		c.init(entries, logTerm, logIndex)
 		return true, PREV
 	}
@@ -207,7 +207,7 @@ func (c *MimicRaftKernelCollector) TryAddEntries(entries []raftpb.Entry, logTerm
 }
 
 func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) Location {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		panic("not initialized")
 	}
 
@@ -235,7 +235,7 @@ func (c *MimicRaftKernelCollector) MatchIndex(index, term uint64) Location {
 }
 
 func (c *MimicRaftKernelCollector) LocateIndex(index uint64) (Location, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		panic("not initialized")
 	}
 
@@ -253,21 +253,21 @@ func (c *MimicRaftKernelCollector) LocateIndex(index uint64) (Location, uint64) 
 }
 
 func (c *MimicRaftKernelCollector) PrevLogTerm() uint64 {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		panic("not initialized")
 	}
 	return c.logTerm
 }
 
 func (c *MimicRaftKernelCollector) FirstIndex() uint64 {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		panic("illegal operation")
 	}
 	return c.logIndex + 1
 }
 
 func (c *MimicRaftKernelCollector) LastIndex() uint64 {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		panic("illegal operation")
 	}
 	return c.logIndex + uint64(len(c.content))
@@ -278,7 +278,7 @@ func (c *MimicRaftKernelCollector) IsEmpty() bool {
 }
 
 func (c *MimicRaftKernelCollector) EntrySize() int {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return 0
 	}
 
@@ -287,7 +287,7 @@ func (c *MimicRaftKernelCollector) EntrySize() int {
 
 //GetLatestTerm gets the Term field of the last entry.
 func (c *MimicRaftKernelCollector) GetLatestTerm() (bool, uint64) {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		return false, 0
 	}
 

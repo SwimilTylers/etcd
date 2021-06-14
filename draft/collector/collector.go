@@ -14,8 +14,8 @@ type EntryFetcher interface {
 }
 
 type Refresher interface {
-	//IsNotInitialized checks if the collector is initialized.
-	IsNotInitialized() bool
+	//IsRefreshed checks if the internal status is changed after last fresh.
+	IsRefreshed() bool
 
 	//Refresh removes all internal status.
 	Refresh()
@@ -87,7 +87,7 @@ func (c *LinkedListCollector) AddEntries(entries []raftpb.Entry, logTerm uint64,
 }
 
 func (c *LinkedListCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil, 0, 0
 	}
 	needle := c.head
@@ -102,7 +102,7 @@ func (c *LinkedListCollector) FetchEntries(term uint64) (bool, []raftpb.Entry, u
 }
 
 func (c *LinkedListCollector) FetchEntriesWithStartIndex(index uint64) (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil, 0, 0
 	}
 
@@ -112,7 +112,7 @@ func (c *LinkedListCollector) FetchEntriesWithStartIndex(index uint64) (bool, []
 }
 
 func (c *LinkedListCollector) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		return false, nil, 0, 0
 	}
 
@@ -127,8 +127,8 @@ func (c *LinkedListCollector) Refresh() {
 	c.regularized = c.defaultRegOpt
 }
 
-func (c *LinkedListCollector) IsNotInitialized() bool {
-	return c.head == nil || c.head.IsNotInitialized()
+func (c *LinkedListCollector) IsRefreshed() bool {
+	return c.head == nil || c.head.IsRefreshed()
 }
 
 func (c *LinkedListCollector) DefaultRegOpt() bool {

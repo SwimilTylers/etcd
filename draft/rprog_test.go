@@ -98,15 +98,15 @@ func runTestForOneStep(ids []uint64, rnd *rand.Rand, policy AnalysisPolicy) ([]s
 				an.OfferRemoteEntries(u1.App.Term, ids[2], u1.App.Commit, u1.App.AE)
 				an.AnalyzeAndRemoveOffers(policy)
 
-				if u0.App.AE.IsNotInitialized() && u1.App.AE.IsNotInitialized() {
+				if u0.App.AE.IsRefreshed() && u1.App.AE.IsRefreshed() {
 					oracles = append(oracles, newEntryComparator(0, 0, nil))
 				} else {
 					oracles = append(oracles, newEntryComparator(
 						bf.GetMinor(
 							branchChosenOracle(
 								policy,
-								branch[0][i], u0.App.Term, forkPoint[i], u0.App.AE.IsNotInitialized(),
-								branch[1][j], u1.App.Term, forkPoint[j], u1.App.AE.IsNotInitialized(),
+								branch[0][i], u0.App.Term, forkPoint[i], u0.App.AE.IsRefreshed(),
+								branch[1][j], u1.App.Term, forkPoint[j], u1.App.AE.IsRefreshed(),
 							),
 							true,
 						),
