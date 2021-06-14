@@ -59,24 +59,24 @@ type Analyzer interface {
 }
 
 type MimicRaftKernelAnalyzer struct {
-	term   uint64
-	commit uint64
+	term   uint64 //term is the currentTerm of analyzer. It will be updated by beforeTerm other than bcCTerm during analysis.
+	commit uint64 //commit is the committed index of analyzer.
 
-	compacted     *collector.MimicRaftKernelBriefCollector
-	beforeCompact *collector.MimicRaftKernelCollector
-	bcCTerm       uint64
-	bcCTHolder    uint64
+	compacted     *collector.MimicRaftKernelBriefCollector //compacted is the replication log successfully synchronized to raft kernel.
+	beforeCompact *collector.MimicRaftKernelCollector      //beforeCompact is the replication log yet not successfully synchronized to raft kernel.
+	bcCTerm       uint64                                   //bcCTerm is CTerm of the last fragment in beforeAnalysis that successfully added to beforeCompact.
+	bcCTHolder    uint64                                   //bcCTHolder is the holder to bcCTerm. If there are several holders, choose the one who offers the latest entry.
 
-	analyzed bool
+	analyzed bool //analyzed indicates whether the offerings are consumed by analysis.
 
-	beforeAnalysis    []*collector.EntryFragment
-	beforeFingerprint map[*collector.EntryFragment]uint64
-	beforeCommitted   uint64
-	beforeTerm        uint64
+	beforeAnalysis    []*collector.EntryFragment          //beforeAnalysis buffers offered fragments for further analysis.
+	beforeFingerprint map[*collector.EntryFragment]uint64 //beforeFingerprint marks ids of the fragment offerings.
+	beforeCommitted   uint64                              //beforeCommitted records the greatest committed index ever offered.
+	beforeTerm        uint64                              //beforeTerm records the greatest currentTerm ever offered. It might be greater than bcCTerm even after analysis.
 
-	bufSize int
+	bufSize int //bufSize defines the default capacity of buffers.
 
-	rbFragments map[uint64][]*collector.EntryFragment
+	rbFragments map[uint64][]*collector.EntryFragment //rbFragments buffers beforeAnalysis for rollback operations.
 }
 
 func NewMimicRaftKernelAnalyzer(offerBufSize int) *MimicRaftKernelAnalyzer {
@@ -89,8 +89,13 @@ func NewMimicRaftKernelAnalyzer(offerBufSize int) *MimicRaftKernelAnalyzer {
 	}
 }
 
+//CloneMimicRaftKernelAnalyzer offers a deep copy of MimicRaftKernelAnalyzer
 func CloneMimicRaftKernelAnalyzer(an *MimicRaftKernelAnalyzer) *MimicRaftKernelAnalyzer {
 	ba := make([]*collector.EntryFragment, 0, cap(an.beforeAnalysis))
+	bf := make(map[*collector.EntryFragment]uint64, cap(an.beforeAnalysis))
+	for f, id := range an.beforeFingerprint {
+		bf[f] = id
+	}
 
 	return &MimicRaftKernelAnalyzer{
 		term:              an.term,
@@ -101,7 +106,7 @@ func CloneMimicRaftKernelAnalyzer(an *MimicRaftKernelAnalyzer) *MimicRaftKernelA
 		bcCTHolder:        an.bcCTHolder,
 		analyzed:          an.analyzed,
 		beforeAnalysis:    append(ba, an.beforeAnalysis...),
-		beforeFingerprint: an.beforeFingerprint,
+		beforeFingerprint: bf,
 		beforeCommitted:   an.beforeCommitted,
 		beforeTerm:        an.beforeTerm,
 		bufSize:           an.bufSize,
@@ -109,6 +114,7 @@ func CloneMimicRaftKernelAnalyzer(an *MimicRaftKernelAnalyzer) *MimicRaftKernelA
 	}
 }
 
+//CopyMimicRaftKernelAnalyzer conducts a shallow copy of MimicRaftKernelAnalyzer
 func CopyMimicRaftKernelAnalyzer(dst, src *MimicRaftKernelAnalyzer) {
 	dst.term = src.term
 	dst.commit = src.commit
@@ -198,37 +204,23 @@ func (an *MimicRaftKernelAnalyzer) AnalyzeAndRemoveOffers(policy AnalysisPolicy)
 		return
 	}
 
-	// sorting fragments
-	sort.Slice(an.beforeAnalysis, func(i, j int) bool {
-		var ai = an.beforeAnalysis[i]
-		var aj = an.beforeAnalysis[j]
-
-		// comparing guarantor, ascending
-		if ai.CTerm != aj.CTerm {
-			return ai.CTerm < aj.CTerm
-		}
-
-		// comparing prefix, ascending
-		if ai.LogIndex != aj.LogIndex {
-			return ai.LogIndex < aj.LogIndex
-		}
-
-		// comparing entry length, descending
-		return len(ai.Fragment) > len(aj.Fragment)
-	})
-
 	switch policy {
 	case UpdateCommittedOnly:
 		an.alignBeforeCommitted()
 	case MatchFirstFragment:
+		an.sortBeforeAnalysis()
 		an.analyzePolicyFirstMatch(false)
 	case MatchLastFragment:
+		an.sortBeforeAnalysis()
 		an.analyzePolicyLastMatch()
 	case StrictlyMatchFirst:
+		an.sortBeforeAnalysis()
 		an.analyzePolicyFirstMatch(true)
 	case AccordingToCompacted:
+		an.sortBeforeAnalysis()
 		an.analyzeWithCompacted()
 	case IgnoreCompacted:
+		an.sortBeforeAnalysis()
 		an.analyzeWithoutCompacted()
 	default:
 		panic("undefined policy")
@@ -415,6 +407,25 @@ func (an *MimicRaftKernelAnalyzer) RollbackAll() map[uint64][]*collector.EntryFr
 	return res
 }
 
+func (an *MimicRaftKernelAnalyzer) sortBeforeAnalysis() {
+	// sorting fragments
+	sort.Slice(an.beforeAnalysis, func(i, j int) bool {
+		var ai = an.beforeAnalysis[i]
+		var aj = an.beforeAnalysis[j]
+
+		// comparing guarantor, ascending
+		if ai.CTerm != aj.CTerm {
+			return ai.CTerm < aj.CTerm
+		}
+
+		// comparing lastIndex, ascending
+		lastI := ai.Fragment[len(ai.Fragment)-1]
+		lastJ := aj.Fragment[len(aj.Fragment)-1]
+
+		return lastI.Index < lastJ.Index
+	})
+}
+
 func (an *MimicRaftKernelAnalyzer) analyzePolicyFirstMatch(strict bool) {
 	var checkBeforeCompact = false
 
@@ -448,6 +459,7 @@ MergeInit:
 				if an.beforeCompact.AddEntries(f.Fragment, f.LogTerm, f.LogIndex) {
 					an.bcCTerm = f.CTerm
 					an.bcCTHolder = an.beforeFingerprint[f]
+
 					an.mergeBeforeAnalysisForward(index+1, strict)
 					an.truncateCompacted()
 					break MergeInit
@@ -568,6 +580,7 @@ func (an *MimicRaftKernelAnalyzer) mergeBeforeAnalysisForward(from int, strict b
 					an.bcCTHolder = an.beforeFingerprint[f]
 					break
 				}
+				index++
 			}
 
 			if index == size {
@@ -579,8 +592,10 @@ func (an *MimicRaftKernelAnalyzer) mergeBeforeAnalysisForward(from int, strict b
 	} else {
 		for i := from; i < size; i++ {
 			f := an.beforeAnalysis[i]
-			_, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex)
-			if loc == collector.UNDERFLOW {
+			if ok, loc := an.beforeCompact.TryAddEntries(f.Fragment, f.LogTerm, f.LogIndex); ok {
+				an.bcCTerm = f.CTerm
+				an.bcCTHolder = an.beforeFingerprint[f]
+			} else if loc == collector.UNDERFLOW {
 				switch an.compacted.MatchIndex(f.LogIndex, f.LogTerm) {
 				case collector.UNDERFLOW:
 					panic("underflow occurs when merging beforeAnalysis")
