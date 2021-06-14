@@ -31,10 +31,7 @@ func ExtractBriefFromEntries(prevLogTerm uint64, ent []raftpb.Entry) []*BriefSeg
 
 			res = append(res, brief)
 
-			brief.PrevLogTerm = brief.Term
-			brief.Term = entry.Term
-			brief.FirstIndex = entry.Index
-			brief.LastIndex = entry.Index
+			brief = &BriefSegment{entry.Term, brief.Term, entry.Index, entry.Index}
 		} else {
 			brief = &BriefSegment{entry.Term, prevLogTerm, entry.Index, entry.Index}
 		}
@@ -343,7 +340,7 @@ func (c *MimicRaftKernelBriefCollector) matchIndex(index, term uint64) (Location
 	case index < first-1:
 		return UNDERFLOW, -1
 	case index == first-1:
-		if c.b[0].HitPrev(index, term) {
+		if c.b[0].HitPrev(term, index) {
 			return PREV, -1
 		} else {
 			return CONFLICT, -1
