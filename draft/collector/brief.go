@@ -94,7 +94,7 @@ func CloneMimicRaftKernelBriefCollector(rkb *MimicRaftKernelBriefCollector) *Mim
 }
 
 func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry, logTerm uint64, logIndex uint64) bool {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		c.init(entries, logTerm, logIndex)
 		return true
 	}
@@ -104,7 +104,7 @@ func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry
 }
 
 func (c *MimicRaftKernelBriefCollector) ResizeBriefToIndex(index uint64) (bool, Location) {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		panic("illegal operation")
 	}
 
@@ -133,7 +133,7 @@ func (c *MimicRaftKernelBriefCollector) Briefing() []*BriefSegment {
 }
 
 func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		panic("not initialized")
 	}
 	l, _ := c.matchIndex(index, term)
@@ -141,7 +141,7 @@ func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location 
 }
 
 func (c *MimicRaftKernelBriefCollector) LocateIndex(index uint64) (Location, uint64) {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		panic("not initialized")
 	}
 
@@ -161,21 +161,21 @@ func (c *MimicRaftKernelBriefCollector) LocateIndex(index uint64) (Location, uin
 }
 
 func (c *MimicRaftKernelBriefCollector) PrevLogTerm() uint64 {
-	if c.IsNotInitialized() {
+	if c.IsRefreshed() {
 		panic("not initialized")
 	}
 	return c.logTerm
 }
 
 func (c *MimicRaftKernelBriefCollector) FirstIndex() uint64 {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		panic("illegal operation")
 	}
 	return c.logIndex + 1
 }
 
 func (c *MimicRaftKernelBriefCollector) LastIndex() uint64 {
-	if c.IsNotInitialized() || c.IsEmpty() {
+	if c.IsRefreshed() || c.IsEmpty() {
 		panic("illegal operation")
 	}
 	return c.next.LastIndex
@@ -185,7 +185,7 @@ func (c *MimicRaftKernelBriefCollector) IsEmpty() bool {
 	return c.next == nil
 }
 
-func (c *MimicRaftKernelBriefCollector) IsNotInitialized() bool {
+func (c *MimicRaftKernelBriefCollector) IsRefreshed() bool {
 	return !c.initialized
 }
 

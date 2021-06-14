@@ -185,7 +185,7 @@ func (an *MimicRaftKernelAnalyzer) OfferRemoteEntries(oTerm, oId, committed uint
 		an.beforeCommitted = committed
 	}
 
-	if ok, fs := efc.FetchFragmentsWithStartIndex(an.commit + 1); !efc.IsNotInitialized() && ok {
+	if ok, fs := efc.FetchFragmentsWithStartIndex(an.commit + 1); !efc.IsRefreshed() && ok {
 		an.beforeAnalysis = append(an.beforeAnalysis, fs...)
 		for _, f := range fs {
 			an.beforeFingerprint[f] = oId
