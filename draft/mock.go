@@ -2,11 +2,9 @@ package draft
 
 import (
 	"fmt"
-	"go.etcd.io/etcd/draft/collector"
 	"go.etcd.io/etcd/raft/raftpb"
 	"math/rand"
 	"os"
-	"reflect"
 	"sync"
 )
 
@@ -346,11 +344,8 @@ func (injector *mockingMemorableIMFInjector) UseMemorable(w IMFWriter) *mockingI
 //mockingEntrySplitter splits an entry sequence into several dispatches. Each dispatch contains a consecutive
 // subsequence of entries.
 type mockingEntrySplitter struct {
-	logTerm  uint64
-	logIndex uint64
-	ent      []raftpb.Entry
+	*entryComparator
 
-	entLen       int
 	nextStartIdx int
 	progress     int
 	commitUpTo   int
@@ -369,13 +364,10 @@ func newMockingEntrySplitter(logTerm uint64, logIndex uint64, ent []raftpb.Entry
 	}
 
 	return &mockingEntrySplitter{
-		logTerm:        logTerm,
-		logIndex:       logIndex,
-		ent:            ent,
-		entLen:         len(ent),
-		commitUpTo:     -1,
-		enableDispatch: true,
-		dispatched:     make([]bool, len(ent)),
+		entryComparator: newEntryComparator(logTerm, logIndex, ent),
+		commitUpTo:      -1,
+		enableDispatch:  true,
+		dispatched:      make([]bool, len(ent)),
 	}
 }
 
@@ -490,67 +482,24 @@ func (mes *mockingEntrySplitter) MoveBackToZero() {
 	mes.MoveBackwards(mes.entLen)
 }
 
-//EquivEntrySeq checks if the splitter shares the same entry sequence.
-//
-// This function accepts the following types of argument(s):
-//	1. EquivEntrySeq(*mockingEntrySplitter)
-//	2. EquivEntrySeq(*collector.EntryFragment)
-//	4. EquivEntrySeq(collector.EntryFragmentCollector)
-//	5. EquivEntrySeq(collector.Locator)
-//	6. EquivEntrySeq(collector.EntryFetcher)
-//	6. EquivEntrySeq(uint64,uint64,[]raftpb.Entry)
-func (mes *mockingEntrySplitter) EquivEntrySeq(o ...interface{}) bool {
-	if len(o) == 1 {
-		switch o[0].(type) {
-		case *mockingEntrySplitter:
-			m := o[0].(*mockingEntrySplitter)
-			return m.logTerm == mes.logTerm && m.logIndex == mes.logIndex && reflect.DeepEqual(m.ent, mes.ent)
-		case *collector.EntryFragment:
-			f := o[0].(*collector.EntryFragment)
-			return f.LogTerm == mes.logTerm && f.LogIndex == mes.logIndex && reflect.DeepEqual(f.Fragment, mes.ent)
-		case collector.EntryFragmentCollector:
-			c := o[0].(collector.EntryFragmentCollector)
-			ok, fs := c.FetchAllFragments()
-			if !ok || len(fs) != 1 {
-				return false
-			}
-			return mes.EquivEntrySeq(fs[0])
-		case collector.Locator:
-			l := o[0].(collector.Locator)
-			if l.IsEmpty() {
-				return false
-			}
+type mockingStorageWrapper struct {
+	*mockingIMFStorage
+	injectors map[string]*mockingIMFInjector
+}
 
-			if l.MatchIndex(mes.logIndex, mes.logTerm) != collector.PREV {
-				return false
-			}
+func newMockingStorageWrapper() *mockingStorageWrapper {
+	return &mockingStorageWrapper{mockingIMFStorage: newMockingIMFStorage(), injectors: make(map[string]*mockingIMFInjector)}
+}
 
-			if l.MatchIndex(mes.ent[mes.entLen-1].Index+1, 0) != collector.OVERFLOW {
-				return false
-			}
-
-			for _, e := range mes.ent {
-				if l.MatchIndex(e.Index, e.Term) != collector.WITHIN {
-					return false
-				}
-			}
-
-			return true
-		case collector.EntryFetcher:
-			f := o[0].(collector.EntryFetcher)
-			ok, ent, lt, li := f.FetchAllEntries()
-			if !ok {
-				return false
-			}
-			return lt == mes.logTerm && li == mes.logIndex && reflect.DeepEqual(ent, mes.ent)
-		}
-	} else if len(o) == 3 {
-		logTerm := o[0].(uint64)
-		logIndex := o[1].(uint64)
-		ent := o[2].([]raftpb.Entry)
-
-		return logTerm == mes.logTerm && logIndex == mes.logIndex && reflect.DeepEqual(ent, mes.ent)
+func (sw *mockingStorageWrapper) Sender(from, to uint64) *mockingIMFInjector {
+	token := rf2t(ft2rf(from, to))
+	if _, ok := sw.injectors[token]; !ok {
+		sw.injectors[token] = newMockingIMFInjector().Use(sw.OfferWriteGrant(token)).InitAs(0, from, to, 0, 0)
 	}
+	return sw.injectors[token]
+}
 
-	panic("illegal arguments")
+func (sw *mockingStorageWrapper) Receiver(from, to uint64) IMFReader {
+	token := rf2t(ft2rf(from, to))
+	return sw.OfferReadGrant(token)
 }
