@@ -57,6 +57,7 @@ type BriefSegmentCollector interface {
 	Refresher
 }
 
+//MimicRaftKernelBriefCollector is an implementation of BriefSegmentCollector.
 type MimicRaftKernelBriefCollector struct {
 	b    []*BriefSegment
 	next *BriefSegment
@@ -99,13 +100,32 @@ func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry
 		return true
 	}
 
+	if c.IsEmpty() {
+		if c.logTerm == logTerm && c.logIndex == logIndex {
+			c.init(entries, logTerm, logIndex)
+			return true
+		}
+		return false
+	}
+
 	ok, _ := c.mimic(entries, logTerm, logIndex)
 	return ok
 }
 
 func (c *MimicRaftKernelBriefCollector) ResizeBriefToIndex(index uint64) (bool, Location) {
-	if c.IsRefreshed() || c.IsEmpty() {
-		panic("illegal operation")
+	if c.IsRefreshed() {
+		panic("cannot resize a non-initialized collector")
+	}
+
+	if c.IsEmpty() {
+		switch {
+		case index < c.logIndex:
+			return false, UNDERFLOW
+		case index == c.logIndex:
+			return true, PREV
+		default:
+			return false, OVERFLOW
+		}
 	}
 
 	first, last := c.b[0].FirstIndex, c.b[len(c.b)-1].LastIndex
@@ -136,6 +156,22 @@ func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location 
 	if c.IsRefreshed() {
 		panic("not initialized")
 	}
+
+	if c.IsEmpty() {
+		switch {
+		case index < c.logIndex:
+			return UNDERFLOW
+		case index == c.logIndex:
+			if term == c.logTerm {
+				return PREV
+			} else {
+				return CONFLICT
+			}
+		default:
+			return OVERFLOW
+		}
+	}
+
 	l, _ := c.matchIndex(index, term)
 	return l
 }
@@ -143,6 +179,17 @@ func (c *MimicRaftKernelBriefCollector) MatchIndex(index, term uint64) Location 
 func (c *MimicRaftKernelBriefCollector) LocateIndex(index uint64) (Location, uint64) {
 	if c.IsRefreshed() {
 		panic("not initialized")
+	}
+
+	if c.IsEmpty() {
+		switch {
+		case index < c.logIndex:
+			return UNDERFLOW, 0
+		case index == c.logIndex:
+			return PREV, c.logTerm
+		default:
+			return OVERFLOW, 0
+		}
 	}
 
 	first, last := c.b[0].FirstIndex, c.b[len(c.b)-1].LastIndex
@@ -182,7 +229,7 @@ func (c *MimicRaftKernelBriefCollector) LastIndex() uint64 {
 }
 
 func (c *MimicRaftKernelBriefCollector) IsEmpty() bool {
-	return c.next == nil
+	return c.next == nil || len(c.b) == 0
 }
 
 func (c *MimicRaftKernelBriefCollector) IsRefreshed() bool {
@@ -208,11 +255,13 @@ func (c *MimicRaftKernelBriefCollector) init(ent []raftpb.Entry, logTerm, logInd
 	}
 }
 
+//mimic compresses entry fragment into BriefSegment, then add the brief like a raft kernel.
+// To be mentioned, it is NOT safe to call this function when the collector is empty!
 func (c *MimicRaftKernelBriefCollector) mimic(entries []raftpb.Entry, logTerm, logIndex uint64) (bool, Location) {
 	// omit checking committed
 
 	// check the existence of <logIndex, logTerm>
-	loc := c.MatchIndex(logIndex, logTerm)
+	loc, _ := c.matchIndex(logIndex, logTerm)
 	if loc != PREV && loc != WITHIN {
 		return false, loc
 	}
@@ -309,14 +358,8 @@ func (c *MimicRaftKernelBriefCollector) locateIndex(index uint64, from, to int) 
 }
 
 func (c *MimicRaftKernelBriefCollector) absorbBriefs(b []*BriefSegment) {
+	// do not accept nil input
 	if len(b) == 0 {
-		return
-	}
-
-	if c.next == nil {
-		c.b = b
-		c.next = b[len(b)-1]
-
 		return
 	}
 
