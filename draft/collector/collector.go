@@ -180,7 +180,7 @@ func (c *LinkedListCollector) addEntries(regularize bool, entries []raftpb.Entry
 	}
 
 	node := c.newNodeCollector(entries, logTerm, logIndex)
-	c.insertAfter(c.tail, node)
+	c.insertAfter(node, c.tail)
 	return node
 }
 
