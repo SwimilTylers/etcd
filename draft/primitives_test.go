@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"time"
 )
 
 func TestEmptyUpdate(t *testing.T) {
@@ -207,9 +208,14 @@ func TestUpdateCollectedEntries(t *testing.T) {
 	round := 15
 
 	for i := 0; i < round; i++ {
-		seed := rand.Int63()
+		var seed = time.Now().UnixNano()
 		rnd := rand.New(rand.NewSource(seed))
 		t.Run("", func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("a panic occurs: seed=%v", seed)
+				}
+			}()
 			mes, u, _ := runTestUpdateCollectedEntries(ids, rnd)
 			if !mes.EquivEntrySeq(u.App.AE) {
 				t.Errorf("entry is incorrectly collected: seed=%v", seed)
@@ -224,7 +230,7 @@ func TestUpdateCollectedEntries(t *testing.T) {
 
 func TestUpdateCollectedEntriesOnce(t *testing.T) {
 	ids := []uint64{0, 1, 2, 3, 4}
-	var seed int64 = 5577006791947779410
+	var seed int64 = 1623917564788772000
 	rnd := rand.New(rand.NewSource(seed))
 
 	mes, u, actions := runTestUpdateCollectedEntries(ids, rnd)
@@ -233,9 +239,9 @@ func TestUpdateCollectedEntriesOnce(t *testing.T) {
 		t.Errorf("entry is incorrectly collected: len=%v, actions=%v", mes.entLen, actions)
 	}
 
-	mes0, mes1, uu, actions0 := runTestUpdateCollectedEntriesOverride(ids, rnd)
+	mes0, mes1, uu, desc := runTestUpdateCollectedEntriesOverride(ids, rnd)
 	if mes0.EquivEntrySeq(uu.App.AE) || !mes1.EquivEntrySeq(uu.App.AE) {
-		t.Errorf("entry is incorrectly collected: len0=%v, len1=%v, actions=\n%v", mes0.entLen, mes1.entLen, actions0[len(actions0)-1])
+		t.Errorf("entry is incorrectly collected: len0=%v, len1=%v, u=%s, actions=\n%v", mes0.entLen, mes1.entLen, desc[1], desc[0])
 	}
 }
 
@@ -264,9 +270,9 @@ func runTestUpdateCollectedEntries(ids []uint64, rnd *rand.Rand) (*mockingEntryS
 func runTestUpdateCollectedEntriesOverride(ids []uint64, rnd *rand.Rand) (*mockingEntrySplitter, *mockingEntrySplitter, *Update, []string) {
 	pps, mis, mrs := preparation(newMockingIMFStorage(), ids, true, true)
 
-	plt, pli, entries := generateEntryDesc(5+rnd.Intn(15), rnd)
-	eLen := len(entries)
-	_, _, entries0 := extendEntryDesc(rnd.Intn(15), rnd, plt, pli, entries[:rnd.Intn(eLen+1)])
+	plt, pli, entries0 := generateEntryDesc(5+rnd.Intn(15), rnd)
+	eLen := len(entries0)
+	_, _, entries1 := extendEntryDesc(1+rnd.Intn(14), rnd, plt, pli, entries0[:rnd.Intn(eLen+1)])
 
 	leader := uint64(0)
 	follower := uint64(1)
@@ -275,16 +281,10 @@ func runTestUpdateCollectedEntriesOverride(ids []uint64, rnd *rand.Rand) (*mocki
 	r, f := ft2rf(leader, follower)
 	token := rf2t(r, f)
 
-	mes0, actions0 := appendRandomWalk(plt, pli, entries, mis[token].AutoVote(), rnd)
-	mes1, actions1 := appendRandomWalk(plt, pli, entries0, mis[token].AutoVote(), rnd)
+	mes0, _ := appendRandomWalk(plt, pli, entries0, mis[token].AutoVote(), rnd)
+	mes1, _ := appendRandomWalk(plt, pli, entries1, mis[token].AutoVote(), rnd)
 
-	var actions []string
-	actions = append(actions, "[0]")
-	actions = append(actions, actions0...)
-	actions = append(actions, "[1]")
-	actions = append(actions, actions1...)
-
-	actions = append(actions, messageToStrings(mrs[token].buf, entries, entries0))
+	var desc = []string{messageToStrings(mrs[token].buf, entries0, entries1)}
 
 	for _, m := range mrs[token].GetAll() {
 		lpp.Write(r, f, m)
@@ -292,7 +292,26 @@ func runTestUpdateCollectedEntriesOverride(ids []uint64, rnd *rand.Rand) (*mocki
 
 	u := pps[follower].GetUpdate(r, f)
 
-	return mes0, mes1, u, actions
+	var uInfo = "no update"
+
+	if u.App != nil && !u.App.AE.IsRefreshed() {
+		if _, fs := u.App.AE.FetchAllFragments(); len(fs) == 1 {
+			ent := fs[0].Fragment
+			if ent[0].Term == entries0[0] {
+				uInfo = "[[all] []]"
+			} else if ent[0].Term == entries1[0] {
+				uInfo = "[[] [all]]"
+			} else {
+				uInfo = "[[some] [some]]"
+			}
+		} else {
+			uInfo = "multiple fragments"
+		}
+	}
+
+	desc = append(desc, uInfo)
+
+	return mes0, mes1, u, desc
 }
 
 func appendRandomWalk(logTerm, logIndex uint64, entries []uint64, mi *mockingIMFInjector, rnd *rand.Rand) (*mockingEntrySplitter, []string) {
