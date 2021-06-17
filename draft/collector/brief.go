@@ -108,6 +108,24 @@ func (c *MimicRaftKernelBriefCollector) AddEntriesToBrief(entries []raftpb.Entry
 		return false
 	}
 
+	// tightly behind the last brief, short-cut
+	if c.next.LastIndex == logIndex && c.next.Term == logTerm {
+		nbs := ExtractBriefFromEntries(logTerm, entries)
+		if len(nbs) != 0 {
+			if nbs[0].Term == c.next.Term {
+				c.next.LastIndex = nbs[0].LastIndex
+				if len(nbs) > 1 {
+					c.b = append(c.b, nbs[1:]...)
+					c.next = c.b[len(c.b)-1]
+				}
+			} else {
+				c.b = append(c.b, nbs...)
+				c.next = c.b[len(c.b)-1]
+			}
+		}
+		return true
+	}
+
 	ok, _ := c.mimic(entries, logTerm, logIndex)
 	return ok
 }
