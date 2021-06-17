@@ -5,6 +5,7 @@ import (
 	"go.etcd.io/etcd/raft/raftpb"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -502,4 +503,241 @@ func (sw *mockingStorageWrapper) Sender(from, to uint64) *mockingIMFInjector {
 func (sw *mockingStorageWrapper) Receiver(from, to uint64) IMFReader {
 	token := rf2t(ft2rf(from, to))
 	return sw.OfferReadGrant(token)
+}
+
+type mockingBranchDescriptor struct {
+	name      string
+	extEntLen int
+
+	derivedFrom *mockingBranchDescriptor
+	anchorPoint int
+	derivedTo   map[int][]*mockingBranchDescriptor
+}
+
+func newMockingBranchDescriptor(name string, extEntLen int) *mockingBranchDescriptor {
+	return &mockingBranchDescriptor{name: name, extEntLen: extEntLen, derivedTo: map[int][]*mockingBranchDescriptor{}}
+}
+
+func (des *mockingBranchDescriptor) AutoAnchor(rnd *rand.Rand, parent *mockingBranchDescriptor) {
+	if parent != nil {
+		des.AnchorTo(1+rnd.Intn(parent.extEntLen), parent)
+	}
+}
+
+func (des *mockingBranchDescriptor) AnchorTo(anchorPoint int, parent *mockingBranchDescriptor) {
+	if parent != nil {
+		parent.derivedTo[anchorPoint] = append(parent.derivedTo[anchorPoint], des)
+		des.anchorPoint = anchorPoint
+		des.derivedFrom = parent
+	}
+}
+
+func (des *mockingBranchDescriptor) Extend(delta int) {
+	des.extEntLen += delta
+}
+
+type mockingBranchWalker func(from *mockingBranchDescriptor, terms map[string]uint64) *mockingBranchDescriptor
+
+type mockingBranchBuilder struct {
+	prime    map[string]*mockingBranchDescriptor
+	branches map[string]*mockingBranchDescriptor
+	bNames   []string
+}
+
+func newMockingBranchBuilder() *mockingBranchBuilder {
+	return &mockingBranchBuilder{prime: map[string]*mockingBranchDescriptor{}, branches: map[string]*mockingBranchDescriptor{}}
+}
+
+func (b *mockingBranchBuilder) AutoDeclare(size int, rnd *rand.Rand) []string {
+	group := fmt.Sprintf("%x", rnd.Uint64()&0xffff)
+	var res []string
+	for i := 0; i < size; i++ {
+		name := fmt.Sprintf("%s-%02d", group, i)
+		b.Declare(name, 1+rnd.Intn(9))
+		res = append(res, name)
+	}
+	return res
+}
+
+func (b *mockingBranchBuilder) Declare(branch string, length int) {
+	if _, ok := b.prime[branch]; ok {
+		panic("duplicated declaration")
+	}
+
+	desc := newMockingBranchDescriptor(branch, length)
+	b.prime[branch] = desc
+	b.branches[branch] = desc
+	b.bNames = append(b.bNames, branch)
+}
+
+func (b *mockingBranchBuilder) Extend(branch string, extLen int) {
+	b.prime[branch].Extend(extLen)
+}
+
+func (b *mockingBranchBuilder) AutoJoin(rnd *rand.Rand) bool {
+	if len(b.prime) < 2 {
+		return false
+	}
+
+	var parent *mockingBranchDescriptor = nil
+	var child *mockingBranchDescriptor = nil
+	var childName string
+
+	bLen := len(b.bNames)
+
+	for parent == nil {
+		pName := b.bNames[rnd.Intn(bLen)]
+		if _, ok := b.prime[pName]; ok {
+			parent = b.branches[pName]
+		}
+	}
+
+	for child == nil {
+		cName := b.bNames[rnd.Intn(bLen)]
+		if desc, ok := b.prime[cName]; ok && desc != parent {
+			childName = cName
+			child = desc
+		}
+	}
+
+	child.AutoAnchor(rnd, parent)
+	delete(b.prime, childName)
+	return true
+}
+
+func (b *mockingBranchBuilder) PrimeSize() int {
+	return len(b.prime)
+}
+
+func (b *mockingBranchBuilder) BranchSize() int {
+	return len(b.branches)
+}
+
+func (b *mockingBranchBuilder) AutoBuild(rnd *rand.Rand) map[string]*entryBranchForkOperator {
+	res := make(map[string]*entryBranchForkOperator, len(b.prime))
+	for name, root := range b.prime {
+		res[name] = b.build(root, rnd)
+	}
+	return res
+}
+
+func (b *mockingBranchBuilder) Walk(w mockingBranchWalker, terms map[string]uint64) map[string]string {
+	res := make(map[string]string, len(b.prime))
+	for root, desc := range b.prime {
+		res[root] = root
+		next := w(desc, terms)
+		for next != nil {
+			res[root] = next.name
+			next = w(next, terms)
+		}
+	}
+	return res
+}
+
+func (b *mockingBranchBuilder) Flatten() map[string][][]string {
+	res := make(map[string][][]string, len(b.branches))
+	for name, desc := range b.branches {
+		var children [][]string
+		for i := 0; i <= desc.extEntLen; i++ {
+			if c := desc.derivedTo[i]; len(c) > 0 {
+				cn := make([]string, len(c))
+				for j, d := range c {
+					cn[j] = d.name
+				}
+				children = append(children, cn)
+			}
+		}
+		res[name] = children
+	}
+	return res
+}
+
+func (b *mockingBranchBuilder) StringFromBranch(branch string) string {
+	sb := &strings.Builder{}
+	pFunc := func(leaf *mockingBranchDescriptor) {
+		var trace []string
+		var forkPoint []int
+
+		anchor := leaf.anchorPoint
+		needle := leaf.derivedFrom
+
+		for needle != nil {
+			trace = append([]string{needle.name}, trace...)
+			forkPoint = append([]int{anchor}, forkPoint...)
+
+			anchor = needle.anchorPoint
+			needle = needle.derivedFrom
+		}
+
+		for i := 1; i < len(forkPoint); i++ {
+			forkPoint[i] += forkPoint[i-1]
+		}
+
+		for i := 0; i < len(trace); i++ {
+			sb.WriteString(fmt.Sprintf("%s [%02d] ", trace[i], forkPoint[i]))
+		}
+		sb.WriteString(fmt.Sprintf("%s\n", leaf.name))
+	}
+	b.dfs(b.branches[branch], pFunc)
+	return sb.String()
+}
+
+func (b *mockingBranchBuilder) GetRootBranches() []string {
+	var res []string
+	for _, desc := range b.prime {
+		res = append(res, desc.name)
+	}
+	return res
+}
+
+func (b *mockingBranchBuilder) GetNonDerivativeBranches() []string {
+	var leaves []string
+	tFunc := func(leaf *mockingBranchDescriptor) {
+		leaves = append(leaves, leaf.name)
+	}
+	for _, desc := range b.prime {
+		b.dfs(desc, tFunc)
+	}
+	return leaves
+}
+
+func (b *mockingBranchBuilder) dfs(root *mockingBranchDescriptor, doReachLeaf func(leaf *mockingBranchDescriptor)) {
+	if len(root.derivedTo) == 0 {
+		doReachLeaf(root)
+	} else {
+		for i := 0; i <= root.extEntLen; i++ {
+			if cs := root.derivedTo[i]; len(cs) > 0 {
+				for _, c := range cs {
+					b.dfs(c, doReachLeaf)
+				}
+			}
+		}
+	}
+}
+
+func (b *mockingBranchBuilder) build(root *mockingBranchDescriptor, rnd *rand.Rand) *entryBranchForkOperator {
+	op := newEntryBranchForkOperator()
+	op.AnchorNamedMajorBranch(root.name, root.extEntLen, rnd)
+	for i := 0; i <= root.extEntLen; i++ {
+		if ds := root.derivedTo[i]; len(ds) > 0 {
+			for _, d := range ds {
+				op.ForkMajorNamedBranch(d.name, i, d.extEntLen, rnd)
+				b.buildForkMinor(d, rnd, op)
+			}
+		}
+	}
+	return op
+}
+
+func (b *mockingBranchBuilder) buildForkMinor(parent *mockingBranchDescriptor, rnd *rand.Rand, op *entryBranchForkOperator) {
+	if parent == nil {
+		return
+	}
+
+	for forkPoint, ds := range parent.derivedTo {
+		for _, d := range ds {
+			op.ForkMinorNamedBranch(d.name, parent.name, forkPoint, d.extEntLen, rnd)
+			b.buildForkMinor(d, rnd, op)
+		}
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -213,6 +214,10 @@ func locateEntryDesc(term uint64, desc []uint64) int {
 	return -1
 }
 
+type testOracle interface {
+	GetOracle(name string) func(o ...interface{}) bool
+}
+
 type entryComparator struct {
 	logTerm, logIndex uint64
 	ent               []raftpb.Entry
@@ -243,7 +248,7 @@ func (ec *entryComparator) FetchAllEntries() (bool, []raftpb.Entry, uint64, uint
 	return true, ec.ent, ec.logTerm, ec.logIndex
 }
 
-//EquivEntrySeq checks if the splitter shares the same entry sequence.
+//EquivEntrySeq checks if it shares the same entry sequence.
 //
 // This function accepts the following types of argument(s):
 //	1. EquivEntrySeq(*collector.EntryFragment)
@@ -304,17 +309,35 @@ func (ec *entryComparator) EquivEntrySeq(o ...interface{}) bool {
 	panic("illegal arguments")
 }
 
-type entryBranchForkHelper struct {
+func (ec *entryComparator) GetOracle(name string) func(o ...interface{}) bool {
+	if name != "exact" {
+		panic("illegal argument")
+	}
+
+	return ec.EquivEntrySeq
+}
+
+func (ec *entryComparator) String() string {
+	terms := make([]uint64, len(ec.ent))
+	for i, entry := range ec.ent {
+		terms[i] = entry.Term
+	}
+	return fmt.Sprintf("logTerm=%v, logIndex=%v, ent=%v", ec.logTerm, ec.logIndex, terms)
+}
+
+type entryBranchForkOperator struct {
 	logIndex, logTerm uint64
 	entries           map[string][]uint64
 
 	forkPoint  map[string]int
 	forkParent map[string]string
 	forkChild  map[string][]string
+
+	major string
 }
 
-func newEntryBranchForkHelper() *entryBranchForkHelper {
-	return &entryBranchForkHelper{
+func newEntryBranchForkOperator() *entryBranchForkOperator {
+	return &entryBranchForkOperator{
 		entries:    map[string][]uint64{},
 		forkPoint:  map[string]int{},
 		forkParent: map[string]string{},
@@ -322,44 +345,64 @@ func newEntryBranchForkHelper() *entryBranchForkHelper {
 	}
 }
 
-func (bf *entryBranchForkHelper) AnchorMajorBranch(size int, rnd *rand.Rand) {
-	bf.logTerm, bf.logIndex, bf.entries["major"] = generateEntryDesc(size, rnd)
+func (bf *entryBranchForkOperator) AnchorMajorBranch(size int, rnd *rand.Rand) {
+	bf.AnchorNamedMajorBranch("major", size, rnd)
 }
 
-//ForkMajorBranch fork a branch from the major branch
-func (bf *entryBranchForkHelper) ForkMajorBranch(forkPoint, extSize int, rnd *rand.Rand) string {
-	name := fmt.Sprintf("minor-%v", rnd.Uint64()&0xffffff)
+func (bf *entryBranchForkOperator) AnchorNamedMajorBranch(name string, size int, rnd *rand.Rand) {
+	bf.major = name
+	bf.logTerm, bf.logIndex, bf.entries[name] = generateEntryDesc(size, rnd)
+}
 
-	_, _, _, bf.entries[name] = forkEntryDesc(forkPoint, extSize, rnd, bf.logTerm, bf.logIndex, bf.entries["major"])
+//ForkMajorNamedBranch fork a branch from the major branch with its name
+func (bf *entryBranchForkOperator) ForkMajorNamedBranch(child string, forkPoint, extSize int, rnd *rand.Rand) {
+	name := child
+
+	_, _, _, bf.entries[name] = forkEntryDesc(forkPoint, extSize, rnd, bf.logTerm, bf.logIndex, bf.entries[bf.major])
 	bf.forkPoint[name] = forkPoint
-	bf.forkParent[name] = "major"
-	bf.forkChild["major"] = append(bf.forkChild["major"], name)
-
-	return name
+	bf.forkParent[name] = bf.major
+	bf.forkChild[bf.major] = append(bf.forkChild[bf.major], name)
 }
 
-//ForkMinorBranch fork a branch from a minor branch
-func (bf *entryBranchForkHelper) ForkMinorBranch(parent string, relativeForkPoint, extSize int, rnd *rand.Rand) string {
-	if parent == "major" {
-		return bf.ForkMajorBranch(relativeForkPoint, extSize, rnd)
+//ForkMinorNamedBranch fork a branch from a minor branch with its name
+func (bf *entryBranchForkOperator) ForkMinorNamedBranch(child, parent string, relativeForkPoint, extSize int, rnd *rand.Rand) {
+	if parent == bf.major {
+		bf.ForkMajorNamedBranch(child, relativeForkPoint, extSize, rnd)
 	}
 
-	name := fmt.Sprintf("%s-%v", parent, rnd.Uint64()&0xffffff)
+	name := child
 	forkPoint := relativeForkPoint + bf.forkPoint[parent]
 
 	_, _, _, bf.entries[name] = forkEntryDesc(forkPoint, extSize, rnd, bf.logTerm, bf.logIndex, bf.entries[parent])
 	bf.forkPoint[name] = forkPoint
 	bf.forkParent[name] = parent
 	bf.forkChild[parent] = append(bf.forkChild[parent], name)
+}
+
+//ForkMajorBranch fork a branch from the major branch
+func (bf *entryBranchForkOperator) ForkMajorBranch(forkPoint, extSize int, rnd *rand.Rand) string {
+	name := fmt.Sprintf("minor-%v", rnd.Uint64()&0xffffff)
+	bf.ForkMajorNamedBranch(name, forkPoint, extSize, rnd)
+	return name
+}
+
+//ForkMinorBranch fork a branch from a minor branch
+func (bf *entryBranchForkOperator) ForkMinorBranch(parent string, relativeForkPoint, extSize int, rnd *rand.Rand) string {
+	if parent == bf.major {
+		return bf.ForkMajorBranch(relativeForkPoint, extSize, rnd)
+	}
+
+	name := fmt.Sprintf("%s-%v", parent, rnd.Uint64()&0xffffff)
+	bf.ForkMinorNamedBranch(name, parent, relativeForkPoint, extSize, rnd)
 
 	return name
 }
 
-func (bf *entryBranchForkHelper) Tracing(name string) ([]string, []int) {
+func (bf *entryBranchForkOperator) Tracing(name string) ([]string, []int) {
 	var branch []string
 	var fork []int
 
-	for name != "major" {
+	for name != bf.major {
 		branch = append([]string{bf.forkParent[name]}, branch...)
 		fork = append([]int{bf.forkPoint[name]}, fork...)
 		name = bf.forkParent[name]
@@ -368,25 +411,204 @@ func (bf *entryBranchForkHelper) Tracing(name string) ([]string, []int) {
 	return branch, fork
 }
 
-func (bf *entryBranchForkHelper) GetMajorTerm() uint64 {
-	ent := bf.entries["major"]
+func (bf *entryBranchForkOperator) GetMajorName() string {
+	return bf.major
+}
+
+func (bf *entryBranchForkOperator) GetMajorTerm() uint64 {
+	ent := bf.entries[bf.major]
 	return ent[len(ent)-1]
 }
 
-func (bf *entryBranchForkHelper) GetMinorTerm(name string) uint64 {
+func (bf *entryBranchForkOperator) GetMinorTerm(name string) uint64 {
 	ent := bf.entries[name]
 	return ent[len(ent)-1]
 }
 
-func (bf *entryBranchForkHelper) GetMajor() (uint64, uint64, []raftpb.Entry) {
-	return generateEntries(bf.logTerm, bf.logIndex, bf.entries["major"])
+func (bf *entryBranchForkOperator) GetMajor() (uint64, uint64, []raftpb.Entry) {
+	return generateEntries(bf.logTerm, bf.logIndex, bf.entries[bf.major])
 }
 
-func (bf *entryBranchForkHelper) GetMinor(name string, onlyForked bool) (uint64, uint64, []raftpb.Entry) {
+func (bf *entryBranchForkOperator) GetMinor(name string, onlyForked bool) (uint64, uint64, []raftpb.Entry) {
 	start := 0
 	if onlyForked {
 		start = bf.forkPoint[name]
 	}
 	ent := bf.entries[name]
 	return generateEntries(cutEntryDesc(bf.logTerm, bf.logIndex, ent, start, len(ent)))
+}
+
+func (bf *entryBranchForkOperator) Oracle(branch string) *branchOracle {
+	return &branchOracle{
+		bf:       bf,
+		shouldBe: branch,
+	}
+}
+
+type branchOracle struct {
+	bf       *entryBranchForkOperator
+	shouldBe string
+}
+
+func (bo *branchOracle) GetOracle(name string) func(o ...interface{}) bool {
+	switch name {
+	case "exact":
+		return newEntryComparator(bo.bf.GetMinor(bo.shouldBe, false)).GetOracle(name)
+	case "inherit":
+		return func(o ...interface{}) bool {
+			l := o[0].(collector.Locator)
+			lastIndex := l.LastIndex()
+			_, lastTerm := l.LocateIndex(lastIndex)
+
+			return isInherit(bo.bf, bo.shouldBe, extractBranchNameFromTermAndIndex(bo.bf, lastTerm, lastIndex))
+		}
+	default:
+		panic("implement me")
+	}
+}
+
+func deleteBranches(branches []string, deleted ...string) []string {
+	var res []string
+	dMap := make(map[string]struct{}, len(deleted))
+	for _, d := range deleted {
+		dMap[d] = struct{}{}
+	}
+	for _, branch := range branches {
+		if _, ok := dMap[branch]; !ok {
+			res = append(res, branch)
+		}
+	}
+	return res
+}
+
+func gatherTraceFromBranches(bf *entryBranchForkOperator, branches ...string) string {
+	sb := &strings.Builder{}
+	for _, branch := range branches {
+		trace, forkPoint := bf.Tracing(branch)
+		for i := 0; i < len(trace); i++ {
+			sb.WriteString(fmt.Sprintf("%s [%02d] ", trace[i], forkPoint[i]))
+		}
+		sb.WriteString(fmt.Sprintf("%s\n", branch))
+	}
+	return sb.String()
+}
+
+func extractBranchNameFromTermAndIndex(bf *entryBranchForkOperator, term, index uint64) string {
+	var res string
+
+	for name, _ := range bf.entries {
+		_, _, ent := bf.GetMinor(name, true)
+		bLast := ent[len(ent)-1]
+		if bLast.Index == index && bLast.Term == term {
+			return name
+		}
+	}
+
+	return res
+}
+
+func extractBranchNameFromEntries(bf *entryBranchForkOperator, entries []raftpb.Entry) string {
+	var res string
+
+	if len(entries) == 0 {
+		panic("cannot locate an empty branch")
+	}
+
+	last := entries[len(entries)-1]
+
+	for name, _ := range bf.entries {
+		_, _, ent := bf.GetMinor(name, true)
+		bLast := ent[len(ent)-1]
+		if reflect.DeepEqual(last, bLast) {
+			return name
+		}
+	}
+
+	return res
+}
+
+func isInherit(bf *entryBranchForkOperator, child, parent string) bool {
+	asc, _ := bf.Tracing(child)
+	for _, a := range asc {
+		if parent == a {
+			return true
+		}
+	}
+	return false
+}
+
+func getMaxTermAmongBranches(bfs ...*entryBranchForkOperator) uint64 {
+	var res uint64 = 0
+	for _, bf := range bfs {
+		if bf.logTerm > res {
+			res = bf.logTerm
+		}
+
+		for _, entries := range bf.entries {
+			if len(entries) > 0 {
+				term := entries[len(entries)-1]
+				if term > res {
+					res = term
+				}
+			}
+		}
+	}
+
+	return res
+}
+
+func assignUniqueTermAmongBranches(startWith uint64, bf *entryBranchForkOperator, rnd *rand.Rand) map[string]uint64 {
+	entries := make([]string, len(bf.entries))
+	top := 0
+	for name, _ := range bf.entries {
+		entries[top] = name
+		top++
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return -1 == strings.Compare(entries[i], entries[j])
+	})
+
+	res := make(map[string]uint64, len(entries))
+	assigned := map[uint64]struct{}{}
+	for _, name := range entries {
+		term := startWith + rnd.Uint64()&0xffff
+		_, ok := assigned[term]
+		for ok {
+			term = startWith + rnd.Uint64()&0xffff
+			_, ok = assigned[term]
+		}
+		res[name] = term
+		assigned[term] = struct{}{}
+	}
+	return res
+}
+
+func shuffleTMap(tMap map[string]uint64, rnd *rand.Rand) map[string]uint64 {
+	names := make([]string, len(tMap))
+	terms := make([]uint64, len(tMap))
+	top := 0
+	for n, t := range tMap {
+		names[top] = n
+		terms[top] = t
+		top++
+	}
+
+	sort.Slice(names, func(i, j int) bool {
+		return -1 == strings.Compare(names[i], names[j])
+	})
+	sort.Slice(terms, func(i, j int) bool {
+		return terms[i] < terms[j]
+	})
+
+	rnd.Shuffle(len(terms), func(i, j int) {
+		tmp := terms[i]
+		terms[i] = terms[j]
+		terms[j] = tmp
+	})
+
+	res := make(map[string]uint64, len(names))
+	for i := 0; i < len(names); i++ {
+		res[names[i]] = terms[i]
+	}
+	return res
 }
