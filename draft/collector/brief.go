@@ -410,7 +410,7 @@ func (c *MimicRaftKernelBriefCollector) matchIndex(index, term uint64) (Location
 		return OVERFLOW, -1
 	default:
 		idx := c.locateTerm(term, 0, len(c.b))
-		if c.b[idx].Hit(term, index) {
+		if 0 <= idx && idx < len(c.b) && c.b[idx].Hit(term, index) {
 			return WITHIN, idx
 		} else {
 			return CONFLICT, -1
